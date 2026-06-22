@@ -19,6 +19,8 @@ namespace GameBoy.Debug.Emulator
 
         private readonly int[] _rgb = new int[Width * Height];
         private readonly int[] _frame = new int[Width * Height];
+        private readonly byte[] _shade = new byte[Width * Height];
+        private readonly byte[] _shadeFrame = new byte[Width * Height];
         private readonly object _sync = new object();
         private int _index;
 
@@ -28,13 +30,17 @@ namespace GameBoy.Debug.Emulator
 
         public void PutDmgPixel(int color)
         {
-            _rgb[_index] = DmgColors[color & 0x03];
+            var shade = color & 0x03;
+            _rgb[_index] = DmgColors[shade];
+            _shade[_index] = (byte)shade;
             _index = (_index + 1) % _rgb.Length;
         }
 
         public void PutColorPixel(int gbcRgb)
         {
-            _rgb[_index] = TranslateGbcRgb(gbcRgb);
+            var rgb = TranslateGbcRgb(gbcRgb);
+            _rgb[_index] = rgb;
+            _shade[_index] = ApproximateDmgShade(rgb);
             _index = (_index + 1) % _rgb.Length;
         }
 
@@ -43,6 +49,7 @@ namespace GameBoy.Debug.Emulator
             lock (_sync)
             {
                 Array.Copy(_rgb, _frame, _rgb.Length);
+                Array.Copy(_shade, _shadeFrame, _shade.Length);
                 _index = 0;
             }
 
@@ -72,12 +79,38 @@ namespace GameBoy.Debug.Emulator
             return copy;
         }
 
+        public byte[] SnapshotDmgShades()
+        {
+            var copy = new byte[_shadeFrame.Length];
+            lock (_sync)
+            {
+                Array.Copy(_shadeFrame, copy, _shadeFrame.Length);
+            }
+
+            return copy;
+        }
+
         private static int TranslateGbcRgb(int gbcRgb)
         {
             var r = (gbcRgb >> 0) & 0x1f;
             var g = (gbcRgb >> 5) & 0x1f;
             var b = (gbcRgb >> 10) & 0x1f;
             return ((r * 8) << 16) | ((g * 8) << 8) | (b * 8);
+        }
+
+        private static byte ApproximateDmgShade(int rgb)
+        {
+            var r = (rgb >> 16) & 0xFF;
+            var g = (rgb >> 8) & 0xFF;
+            var b = rgb & 0xFF;
+            var luma = (r * 299 + g * 587 + b * 114) / 1000;
+            return luma switch
+            {
+                >= 192 => 0,
+                >= 128 => 1,
+                >= 64 => 2,
+                _ => 3,
+            };
         }
     }
 }

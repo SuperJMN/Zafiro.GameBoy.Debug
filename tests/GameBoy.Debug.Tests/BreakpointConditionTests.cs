@@ -37,6 +37,30 @@ public sealed class BreakpointConditionTests
     }
 
     [Theory]
+    [InlineData("LY >= 0x90", true)]
+    [InlineData("STAT == 0x85", true)]
+    [InlineData("SCX == 4", true)]
+    [InlineData("OBP0 != 0", true)]
+    public void Ppu_alias_conditions_read_matching_io_registers(string expression, bool expected)
+    {
+        var condition = Parse(expression);
+        var context = new TestConditionContext(
+            Registers,
+            new Dictionary<ushort, byte>
+            {
+                [0xFF41] = 0x85,
+                [0xFF43] = 4,
+                [0xFF44] = 0x90,
+                [0xFF48] = 0xFC,
+            });
+
+        var result = condition.Evaluate(context);
+
+        Assert.True(result.IsSuccess, result.Error?.Message);
+        Assert.Equal(expected, result.Value);
+    }
+
+    [Theory]
     [InlineData("[0xFF80] == 1", true)]
     [InlineData("[65408] == 1", true)]
     [InlineData("[HL] < 4", true)]

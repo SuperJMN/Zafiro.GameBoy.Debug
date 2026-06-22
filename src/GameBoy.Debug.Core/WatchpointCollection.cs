@@ -10,9 +10,16 @@ public sealed class WatchpointCollection
     public bool HasEnabledReadWatchpoints =>
         byId.Values.Any(watchpoint => watchpoint.Enabled && watchpoint.Mode is WatchpointMode.Read or WatchpointMode.Access);
 
-    public WatchpointInfo Set(ushort address, WatchpointMode mode)
+    public WatchpointInfo Set(ushort address, WatchpointMode mode) => Set(address, 1, mode);
+
+    public WatchpointInfo Set(ushort address, int length, WatchpointMode mode)
     {
-        var info = new WatchpointInfo($"wp-{nextId++}", Hex.FormatWord(address), address, mode, true);
+        if (length < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(length), length, "Watchpoint length must be positive.");
+        }
+
+        var info = new WatchpointInfo($"wp-{nextId++}", Hex.FormatWord(address), address, length, mode, true);
         byId.Add(info.Id, info);
         return info;
     }
@@ -25,7 +32,7 @@ public sealed class WatchpointCollection
     {
         foreach (var candidate in byId.Values)
         {
-            if (!candidate.Enabled || candidate.AddressValue != address)
+            if (!candidate.Enabled || address < candidate.AddressValue || address > candidate.EndAddressValue)
             {
                 continue;
             }

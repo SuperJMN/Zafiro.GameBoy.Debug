@@ -21,6 +21,18 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
         JoypadButton.Select,
         JoypadButton.Start,
     ];
+    private static readonly IReadOnlyDictionary<string, JoypadButton> ButtonNames =
+        new Dictionary<string, JoypadButton>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["right"] = JoypadButton.Right,
+            ["left"] = JoypadButton.Left,
+            ["up"] = JoypadButton.Up,
+            ["down"] = JoypadButton.Down,
+            ["a"] = JoypadButton.A,
+            ["b"] = JoypadButton.B,
+            ["select"] = JoypadButton.Select,
+            ["start"] = JoypadButton.Start,
+        };
     private readonly BreakpointCollection breakpoints = new();
     private readonly SymbolService symbols = new();
     private IntPtr handle;
@@ -28,6 +40,9 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
     private bool romLoaded;
     private string? romTitle;
     private string? romModel;
+    private ulong totalFrames;
+    private ulong totalCycles;
+    private ulong totalInstructions;
 
     public DebugResult<LoadRomResult> LoadRom(string path)
     {
@@ -51,6 +66,9 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
         }
 
         breakpoints.ClearAll();
+        totalFrames = 0;
+        totalCycles = 0;
+        totalInstructions = 0;
         romLoaded = true;
         romTitle = title.ToString();
         romModel = model.ToString();
@@ -66,9 +84,15 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
         }
 
         var result = SameBoyNative.Reset(handle);
-        return result == 0
-            ? DebugResult<ResetResult>.Success(new ResetResult(true))
-            : NativeFailure<ResetResult>("reset_failed");
+        if (result != 0)
+        {
+            return NativeFailure<ResetResult>("reset_failed");
+        }
+
+        totalFrames = 0;
+        totalCycles = 0;
+        totalInstructions = 0;
+        return DebugResult<ResetResult>.Success(new ResetResult(true));
     }
 
     public DebugResult<SaveStateResult> SaveState(string path)
@@ -140,7 +164,7 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
             ? string.Join('\n', disassembly.Value.Instructions.Select(instruction => $"{instruction.Address}: {instruction.Text}"))
             : "";
 
-        return DebugResult<StepInstructionResult>.Success(new StepInstructionResult(before.Value.Pc, after.Value.Pc, after.Value, text));
+        return DebugResult<StepInstructionResult>.Success(new StepInstructionResult(before.Value.Pc, after.Value.Pc, after.Value, text, count, GetTimeline()));
     }
 
     public DebugResult<RunFrameResult> RunFrame(int count)
@@ -171,7 +195,10 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
             return DebugResult<RunFrameResult>.Failure(hitBreakpoint.Error!.Code, hitBreakpoint.Error.Message);
         }
 
-        return DebugResult<RunFrameResult>.Success(new RunFrameResult(count, registers.Value, hitBreakpoint.Value));
+        totalFrames += (uint)count;
+        totalCycles += (ulong)count * 70224UL;
+
+        return DebugResult<RunFrameResult>.Success(new RunFrameResult(count, registers.Value, hitBreakpoint.Value, GetTimeline()));
     }
 
     public DebugResult<JoypadStateResult> SetJoypad(IReadOnlyList<JoypadButton> pressedButtons)
@@ -258,9 +285,9 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
 
         return Stop("maxInstructions", registers.Value);
 
-        static DebugResult<ContinueResult> Stop(string reason, CpuRegisters registers)
+        DebugResult<ContinueResult> Stop(string reason, CpuRegisters registers)
         {
-            return DebugResult<ContinueResult>.Success(new ContinueResult(true, reason, registers.Pc, registers));
+            return DebugResult<ContinueResult>.Success(new ContinueResult(true, reason, registers.Pc, registers, GetTimeline(), 0));
         }
     }
 
@@ -304,6 +331,56 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
         return StepUntil(maxInstructions, registers => ParseWord(registers.Sp) > startSp, "step_out");
     }
 
+    public DebugResult<RunUntilConditionResult> RunUntilCondition(string condition, int maxInstructions, int maxFrames)
+    {
+        if (!BreakpointCondition.TryParse(condition, out var parsedCondition, out var conditionError) || parsedCondition is null)
+        {
+            return DebugResult<RunUntilConditionResult>.Failure("invalid_condition", $"Invalid condition: {conditionError ?? "Condition is required."}");
+        }
+
+        var startFrames = totalFrames;
+        for (var i = 0; i < maxInstructions; i++)
+        {
+            var registers = ReadRegisters();
+            if (!registers.IsSuccess)
+            {
+                return DebugResult<RunUntilConditionResult>.Failure(registers.Error!.Code, registers.Error.Message);
+            }
+
+            var conditionResult = parsedCondition.Evaluate(new BreakpointConditionContext(this, registers.Value));
+            if (!conditionResult.IsSuccess)
+            {
+                return DebugResult<RunUntilConditionResult>.Failure(conditionResult.Error!.Code, conditionResult.Error.Message);
+            }
+
+            if (conditionResult.Value)
+            {
+                return StopRunUntilCondition("condition", registers.Value, (uint)i, startFrames);
+            }
+
+            if (registers.Value.Halted)
+            {
+                return StopRunUntilCondition("halt", registers.Value, (uint)i, startFrames);
+            }
+
+            if (totalFrames - startFrames >= (ulong)maxFrames)
+            {
+                return StopRunUntilCondition("maxFrames", registers.Value, (uint)i, startFrames);
+            }
+
+            var step = StepOnce();
+            if (!step.IsSuccess)
+            {
+                return DebugResult<RunUntilConditionResult>.Failure(step.Error!.Code, step.Error.Message);
+            }
+        }
+
+        var final = ReadRegisters();
+        return final.IsSuccess
+            ? StopRunUntilCondition("maxInstructions", final.Value, (uint)maxInstructions, startFrames)
+            : DebugResult<RunUntilConditionResult>.Failure(final.Error!.Code, final.Error.Message);
+    }
+
     public DebugResult<BreakpointSetResult> SetBreakpoint(ushort address, string? condition)
     {
         if (!BreakpointCondition.TryParse(condition, out var parsedCondition, out var conditionError))
@@ -338,6 +415,11 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
         return DebugResult<WatchpointSetResult>.Failure("watchpoints_not_supported", "Watchpoints are only supported by the managed backend.");
     }
 
+    public DebugResult<WatchpointSetResult> SetWatchpointRange(ushort address, int length, WatchpointMode mode)
+    {
+        return DebugResult<WatchpointSetResult>.Failure("watchpoints_not_supported", "Watchpoints are only supported by the managed backend.");
+    }
+
     public DebugResult<ClearWatchpointResult> ClearWatchpoint(string watchpointId)
     {
         return DebugResult<ClearWatchpointResult>.Failure("watchpoints_not_supported", "Watchpoints are only supported by the managed backend.");
@@ -352,13 +434,13 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
     {
         if (!romLoaded)
         {
-            return DebugResult<SessionStateResult>.Success(new SessionStateResult(false, null, null, false, null));
+            return DebugResult<SessionStateResult>.Success(new SessionStateResult(false, null, null, false, null, new TimelineCounters(0, 0)));
         }
 
         var registers = ReadRegisters();
         return registers.IsSuccess
             ? DebugResult<SessionStateResult>.Success(
-                new SessionStateResult(true, romTitle, romModel, registers.Value.Halted, registers.Value.Pc))
+                new SessionStateResult(true, romTitle, romModel, registers.Value.Halted, registers.Value.Pc, GetTimeline()))
             : DebugResult<SessionStateResult>.Failure(registers.Error!.Code, registers.Error.Message);
     }
 
@@ -520,6 +602,28 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
             : new LastWriterResult(false, Hex.FormatWord(address), null, null, 0));
     }
 
+    public DebugResult<LastWritersResult> FindLastWriters(ushort address, int length)
+    {
+        if (length < 1 || address + length > 0x10000)
+        {
+            return DebugResult<LastWritersResult>.Failure("invalid_range", "Writer range must fit within 0x0000..0xFFFF.");
+        }
+
+        var writers = new List<LastWriterResult>(length);
+        for (var i = 0; i < length; i++)
+        {
+            var writer = FindLastWriter((ushort)(address + i));
+            if (!writer.IsSuccess)
+            {
+                return DebugResult<LastWritersResult>.Failure(writer.Error!.Code, writer.Error.Message);
+            }
+
+            writers.Add(writer.Value);
+        }
+
+        return DebugResult<LastWritersResult>.Success(new LastWritersResult(writers));
+    }
+
     public DebugResult<TraceUntilWriteResult> TraceUntilWrite(ushort address, int maxInstructions)
     {
         var native = EnsureHandle<TraceUntilWriteResult>();
@@ -541,8 +645,48 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
         }
 
         return DebugResult<TraceUntilWriteResult>.Success(result == 0
-            ? new TraceUntilWriteResult(true, "write", Hex.FormatWord(address), Hex.FormatWord(pc), Hex.FormatByte(value), instructionsRun, registers.Value)
-            : new TraceUntilWriteResult(true, "maxInstructions", Hex.FormatWord(address), null, null, instructionsRun, registers.Value));
+            ? new TraceUntilWriteResult(true, "write", Hex.FormatWord(address), Hex.FormatWord(pc), Hex.FormatByte(value), instructionsRun, registers.Value, GetTimeline())
+            : new TraceUntilWriteResult(true, "maxInstructions", Hex.FormatWord(address), null, null, instructionsRun, registers.Value, GetTimeline()));
+    }
+
+    public DebugResult<TraceUntilWriteRangeResult> TraceUntilWriteRange(ushort address, int length, int maxInstructions)
+    {
+        if (length == 1)
+        {
+            var trace = TraceUntilWrite(address, maxInstructions);
+            if (!trace.IsSuccess)
+            {
+                return DebugResult<TraceUntilWriteRangeResult>.Failure(trace.Error!.Code, trace.Error.Message);
+            }
+
+            var ppu = ReadPpuState();
+            if (!ppu.IsSuccess)
+            {
+                return DebugResult<TraceUntilWriteRangeResult>.Failure(ppu.Error!.Code, ppu.Error.Message);
+            }
+
+            var disassembly = Disassemble(trace.Value.Pc is null ? ParseWord(trace.Value.Registers.Pc) : ParseWord(trace.Value.Pc), 4);
+            if (!disassembly.IsSuccess)
+            {
+                return DebugResult<TraceUntilWriteRangeResult>.Failure(disassembly.Error!.Code, disassembly.Error.Message);
+            }
+
+            return DebugResult<TraceUntilWriteRangeResult>.Success(new TraceUntilWriteRangeResult(
+                trace.Value.Stopped,
+                trace.Value.Reason,
+                trace.Value.Address,
+                1,
+                trace.Value.Reason == "write" ? trace.Value.Address : null,
+                trace.Value.Pc,
+                trace.Value.Value,
+                trace.Value.InstructionsRun,
+                trace.Value.Registers,
+                ppu.Value,
+                disassembly.Value,
+                GetTimeline()));
+        }
+
+        return DebugResult<TraceUntilWriteRangeResult>.Failure("range_trace_not_supported", "Range tracing is only supported by the managed backend.");
     }
 
     public DebugResult<TilemapDumpResult> DumpTilemap(ushort address)
@@ -603,6 +747,67 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
         return bytes.IsSuccess
             ? DebugResult<ReadSymbolResult>.Success(new ReadSymbolResult(name, Hex.FormatWord(resolved.Value.Address), bytes.Value, Hex.FormatBytes(bytes.Value)))
             : DebugResult<ReadSymbolResult>.Failure(bytes.Error!.Code, bytes.Error.Message);
+    }
+
+    public DebugResult<ScreenRegionResult> ReadScreenRegion(int x, int y, int width, int height, string format)
+    {
+        return DebugResult<ScreenRegionResult>.Failure("screen_region_not_supported", "Screen region probes are only supported by the managed backend.");
+    }
+
+    public DebugResult<InputTimelineResult> RunInputTimeline(IReadOnlyList<InputTimelineStep> steps)
+    {
+        var stepResults = new List<InputTimelineStepResult>(steps.Count);
+        var framesRun = 0;
+        try
+        {
+            for (var index = 0; index < steps.Count; index++)
+            {
+                var step = steps[index];
+                var buttons = ParseButtonNames(step.Buttons);
+                if (!buttons.IsSuccess)
+                {
+                    return DebugResult<InputTimelineResult>.Failure(buttons.Error!.Code, buttons.Error.Message);
+                }
+
+                var set = SetJoypad(buttons.Value);
+                if (!set.IsSuccess)
+                {
+                    return DebugResult<InputTimelineResult>.Failure(set.Error!.Code, set.Error.Message);
+                }
+
+                var run = RunFrame(step.Frames);
+                if (!run.IsSuccess)
+                {
+                    return DebugResult<InputTimelineResult>.Failure(run.Error!.Code, run.Error.Message);
+                }
+
+                framesRun += run.Value.FramesRun;
+                stepResults.Add(new InputTimelineStepResult(
+                    index,
+                    run.Value.FramesRun,
+                    totalFrames,
+                    buttons.Value.Select(ToButtonName).ToArray(),
+                    step.ReadRegisters ? ReadRegisters().Value : null,
+                    step.ReadPpuState ? ReadPpuState().Value : null,
+                    step.DumpOam ? ReadOam().Value : null,
+                    step.Capture ? CaptureScreen().Value : null,
+                    null,
+                    null,
+                    GetTimeline()));
+            }
+        }
+        finally
+        {
+            _ = SetJoypad([]);
+        }
+
+        var released = SetJoypad([]);
+        if (!released.IsSuccess)
+        {
+            return DebugResult<InputTimelineResult>.Failure(released.Error!.Code, released.Error.Message);
+        }
+
+        return DebugResult<InputTimelineResult>.Success(new InputTimelineResult(framesRun, released.Value, stepResults, GetTimeline()));
     }
 
     public void Dispose()
@@ -739,9 +944,9 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
             : DebugResult<ContinueResult>.Failure(final.Error!.Code, final.Error.Message);
     }
 
-    private static DebugResult<ContinueResult> Stop(string reason, CpuRegisters registers)
+    private DebugResult<ContinueResult> Stop(string reason, CpuRegisters registers)
     {
-        return DebugResult<ContinueResult>.Success(new ContinueResult(true, reason, registers.Pc, registers));
+        return DebugResult<ContinueResult>.Success(new ContinueResult(true, reason, registers.Pc, registers, GetTimeline(), 0));
     }
 
     private static bool IsCallOrRst(byte opcode, out int length)
@@ -794,9 +999,13 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
             return native;
         }
 
-        return SameBoyNative.Step(handle) == 0
-            ? DebugResult<bool>.Success(true)
-            : NativeFailure<bool>("step_instruction_failed");
+        if (SameBoyNative.Step(handle) != 0)
+        {
+            return NativeFailure<bool>("step_instruction_failed");
+        }
+
+        totalInstructions++;
+        return DebugResult<bool>.Success(true);
     }
 
     private static DebugResult<byte> ToButtonMask(IReadOnlyList<JoypadButton> pressedButtons)
@@ -813,6 +1022,35 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
         }
 
         return DebugResult<byte>.Success(mask);
+    }
+
+    private static DebugResult<IReadOnlyList<JoypadButton>> ParseButtonNames(IReadOnlyList<string>? buttons)
+    {
+        if (buttons is null)
+        {
+            return DebugResult<IReadOnlyList<JoypadButton>>.Failure("invalid_buttons", "buttons is required.");
+        }
+
+        var selected = new HashSet<JoypadButton>();
+        foreach (var rawButton in buttons)
+        {
+            var button = rawButton?.Trim();
+            if (string.IsNullOrEmpty(button))
+            {
+                return DebugResult<IReadOnlyList<JoypadButton>>.Failure("invalid_button", "Button names must not be empty.");
+            }
+
+            if (!ButtonNames.TryGetValue(button, out var parsed))
+            {
+                return DebugResult<IReadOnlyList<JoypadButton>>.Failure(
+                    "invalid_button",
+                    $"Unknown button '{button}'. Valid buttons: {string.Join(", ", ButtonNames.Keys)}.");
+            }
+
+            selected.Add(parsed);
+        }
+
+        return DebugResult<IReadOnlyList<JoypadButton>>.Success(CanonicalButtons.Where(selected.Contains).ToArray());
     }
 
     private static JoypadStateResult ToJoypadState(byte mask)
@@ -845,6 +1083,29 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
             JoypadButton.Start => "start",
             _ => throw new ArgumentOutOfRangeException(nameof(button), button, null),
         };
+    }
+
+    private TimelineCounters GetTimeline() => new(totalFrames, totalCycles, totalInstructions);
+
+    private DebugResult<RunUntilConditionResult> StopRunUntilCondition(
+        string reason,
+        CpuRegisters registers,
+        uint instructionsRun,
+        ulong startFrames)
+    {
+        var ppu = ReadPpuState();
+        return ppu.IsSuccess
+            ? DebugResult<RunUntilConditionResult>.Success(
+                new RunUntilConditionResult(
+                    true,
+                    reason,
+                    registers.Pc,
+                    instructionsRun,
+                    totalFrames - startFrames,
+                    registers,
+                    ppu.Value,
+                    GetTimeline()))
+            : DebugResult<RunUntilConditionResult>.Failure(ppu.Error!.Code, ppu.Error.Message);
     }
 
     private DebugResult<T> EnsureHandle<T>()

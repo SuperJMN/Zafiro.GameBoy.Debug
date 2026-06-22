@@ -162,6 +162,59 @@ public sealed class McpToolValidationTests
     }
 
     [Fact]
+    public void Capture_screen_rejects_unsafe_artifact_path_without_calling_session()
+    {
+        var session = new FakeDebugSession();
+
+        var result = GameBoyDebugTools.CaptureScreen(session, "../escape.png", includeMetadata: true);
+
+        var error = Assert.IsType<ToolError>(result);
+        Assert.Equal("invalid_artifact_path", error.Error.Code);
+        Assert.False(session.CaptureScreenCalled);
+    }
+
+    [Fact]
+    public void Capture_screen_can_save_png_artifact_with_metadata()
+    {
+        var previousDirectory = Environment.CurrentDirectory;
+        var tempDirectory = Path.Combine(Path.GetTempPath(), $"gameboy-mcp-artifact-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDirectory);
+        Environment.CurrentDirectory = tempDirectory;
+        var pngBytes = new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G' };
+        var registers = RegistersAt("0x0100");
+        var ppuState = PpuState();
+        var session = new FakeDebugSession
+        {
+            CaptureScreenResult = DebugResult<ScreenCaptureResult>.Success(
+                new ScreenCaptureResult(160, 144, "image/png", pngBytes)),
+            GetStateResult = DebugResult<SessionStateResult>.Success(
+                new SessionStateResult(true, "MCPTEST", "DMG", false, "0x0100", new TimelineCounters(3, 210672))),
+            ReadRegistersResult = DebugResult<CpuRegisters>.Success(registers),
+            ReadPpuStateResult = DebugResult<PpuStateResult>.Success(ppuState),
+        };
+
+        try
+        {
+            var result = GameBoyDebugTools.CaptureScreen(session, "artifacts/frame.png", includeMetadata: true);
+
+            var payload = Assert.IsType<ScreenCaptureArtifactResult>(result);
+            Assert.True(session.CaptureScreenCalled);
+            Assert.Equal("artifacts/frame.png", payload.Path);
+            Assert.Equal(160, payload.Width);
+            Assert.True(File.Exists(Path.Combine(tempDirectory, "artifacts", "frame.png")));
+            Assert.Equal(pngBytes, File.ReadAllBytes(Path.Combine(tempDirectory, "artifacts", "frame.png")));
+            Assert.NotNull(payload.Metadata);
+            Assert.Equal("MCPTEST", payload.Metadata.RomTitle);
+            Assert.Equal(3UL, payload.Metadata.Timeline.Frames);
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previousDirectory;
+            Directory.Delete(tempDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Set_breakpoint_rejects_invalid_condition_without_calling_session()
     {
         var session = new FakeDebugSession();
@@ -262,6 +315,103 @@ public sealed class McpToolValidationTests
     }
 
     [Fact]
+    public void Set_watchpoint_range_validates_length_before_calling_session()
+    {
+        var session = new FakeDebugSession();
+
+        var result = GameBoyDebugTools.SetWatchpointRange(session, "0xC000", 0, "write");
+
+        var error = Assert.IsType<ToolError>(result);
+        Assert.Equal("invalid_range_length", error.Error.Code);
+        Assert.False(session.SetWatchpointRangeCalled);
+    }
+
+    [Fact]
+    public void Set_watchpoint_range_passes_range_and_mode_to_session()
+    {
+        var session = new FakeDebugSession
+        {
+            SetWatchpointRangeResult = DebugResult<WatchpointSetResult>.Success(
+                new WatchpointSetResult("wp-1", "0xC000", "write", true, 32)),
+        };
+
+        var result = GameBoyDebugTools.SetWatchpointRange(session, "0xC000", 32, "write");
+
+        var payload = Assert.IsType<WatchpointSetResult>(result);
+        Assert.True(session.SetWatchpointRangeCalled);
+        Assert.Equal((ushort)0xC000, session.LastWatchpointAddress);
+        Assert.Equal(32, session.LastWatchpointLength);
+        Assert.Equal(WatchpointMode.Write, session.LastWatchpointMode);
+        Assert.Equal(32, payload.Length);
+    }
+
+    [Fact]
+    public void Run_until_condition_rejects_invalid_condition_without_calling_session()
+    {
+        var session = new FakeDebugSession();
+
+        var result = GameBoyDebugTools.RunUntilCondition(session, "LY => 0x90", 100, 2);
+
+        var error = Assert.IsType<ToolError>(result);
+        Assert.Equal("invalid_condition", error.Error.Code);
+        Assert.False(session.RunUntilConditionCalled);
+    }
+
+    [Fact]
+    public void Trace_until_write_range_validates_address_range_before_calling_session()
+    {
+        var session = new FakeDebugSession();
+
+        var result = GameBoyDebugTools.TraceUntilWriteRange(session, "0xFFF0", 32, 1000);
+
+        var error = Assert.IsType<ToolError>(result);
+        Assert.Equal("invalid_range", error.Error.Code);
+        Assert.False(session.TraceUntilWriteRangeCalled);
+    }
+
+    [Fact]
+    public void Read_screen_region_validates_bounds_before_calling_session()
+    {
+        var session = new FakeDebugSession();
+
+        var result = GameBoyDebugTools.ReadScreenRegion(session, 159, 0, 2, 1);
+
+        var error = Assert.IsType<ToolError>(result);
+        Assert.Equal("invalid_screen_region", error.Error.Code);
+        Assert.False(session.ReadScreenRegionCalled);
+    }
+
+    [Fact]
+    public void Run_input_timeline_passes_normalized_steps_to_session_atomically()
+    {
+        var session = new FakeDebugSession
+        {
+            RunInputTimelineResult = DebugResult<InputTimelineResult>.Success(
+                new InputTimelineResult(
+                    4,
+                    new JoypadStateResult(false, false, false, false, false, false, false, false, []),
+                    [
+                        new InputTimelineStepResult(0, 4, 4, ["right", "a"], RegistersAt("0x0102"), PpuState(), null, null, null, null, null),
+                    ],
+                    new TimelineCounters(4, 280896))),
+        };
+
+        var result = GameBoyDebugTools.RunInputTimeline(
+            session,
+            [
+                new InputTimelineStep { Frames = 4, Buttons = ["right", "a"], ReadRegisters = true, ReadPpuState = true },
+            ]);
+
+        var payload = Assert.IsType<InputTimelineResult>(result);
+        Assert.Equal(4, payload.FramesRun);
+        Assert.True(session.RunInputTimelineCalled);
+        Assert.Equal(["right", "a"], session.LastInputTimelineSteps[0].Buttons);
+        var step = Assert.Single(payload.Steps);
+        Assert.NotNull(step.Registers);
+        Assert.NotNull(step.PpuState);
+    }
+
+    [Fact]
     public void Watchpoint_result_serializes_mode_as_lowercase_string()
     {
         var result = new WatchpointSetResult("wp-1", "0xC000", "read", true);
@@ -282,6 +432,45 @@ public sealed class McpToolValidationTests
         Assert.Equal("invalid_max_instructions", error.Error.Code);
         Assert.False(session.StepOverCalled);
     }
+
+    private static CpuRegisters RegistersAt(string pc) =>
+        new(
+            "0x0000",
+            "0x0000",
+            "0x0000",
+            "0x0000",
+            "0xFFFE",
+            pc,
+            "0x00",
+            "0x00",
+            "0x00",
+            "0x00",
+            "0x00",
+            "0x00",
+            "0x00",
+            "0x00",
+            false,
+            false);
+
+    private static PpuStateResult PpuState() =>
+        new(
+            "0x91",
+            "0x85",
+            1,
+            "0x90",
+            "0x00",
+            "0x00",
+            "0x00",
+            "0x00",
+            "0x00",
+            "0xFC",
+            "0xFF",
+            "0xFF",
+            "0x00",
+            true,
+            false,
+            false,
+            true);
 
     private sealed class FakeDebugSession : IGameBoyDebugSession
     {
@@ -319,11 +508,25 @@ public sealed class McpToolValidationTests
 
         public bool SetWatchpointCalled { get; private set; }
 
+        public bool SetWatchpointRangeCalled { get; private set; }
+
         public ushort LastWatchpointAddress { get; private set; }
+
+        public int LastWatchpointLength { get; private set; }
 
         public WatchpointMode LastWatchpointMode { get; private set; }
 
         public bool StepOverCalled { get; private set; }
+
+        public bool RunUntilConditionCalled { get; private set; }
+
+        public bool TraceUntilWriteRangeCalled { get; private set; }
+
+        public bool ReadScreenRegionCalled { get; private set; }
+
+        public bool RunInputTimelineCalled { get; private set; }
+
+        public IReadOnlyList<InputTimelineStep> LastInputTimelineSteps { get; private set; } = [];
 
         public DebugResult<MemoryReadResult> ReadMemoryResult { get; init; } =
             DebugResult<MemoryReadResult>.Failure("not_configured", "The fake session was not configured.");
@@ -351,6 +554,18 @@ public sealed class McpToolValidationTests
 
         public DebugResult<WatchpointSetResult> SetWatchpointResult { get; init; } =
             DebugResult<WatchpointSetResult>.Failure("not_configured", "The fake session was not configured.");
+
+        public DebugResult<WatchpointSetResult> SetWatchpointRangeResult { get; init; } =
+            DebugResult<WatchpointSetResult>.Failure("not_configured", "The fake session was not configured.");
+
+        public DebugResult<CpuRegisters> ReadRegistersResult { get; init; } =
+            DebugResult<CpuRegisters>.Failure("not_configured", "The fake session was not configured.");
+
+        public DebugResult<PpuStateResult> ReadPpuStateResult { get; init; } =
+            DebugResult<PpuStateResult>.Failure("not_configured", "The fake session was not configured.");
+
+        public DebugResult<InputTimelineResult> RunInputTimelineResult { get; init; } =
+            DebugResult<InputTimelineResult>.Failure("not_configured", "The fake session was not configured.");
 
         public DebugResult<LoadRomResult> LoadRom(string path) => throw new NotSupportedException();
 
@@ -399,6 +614,12 @@ public sealed class McpToolValidationTests
 
         public DebugResult<ContinueResult> StepOut(int maxInstructions) => throw new NotSupportedException();
 
+        public DebugResult<RunUntilConditionResult> RunUntilCondition(string condition, int maxInstructions, int maxFrames)
+        {
+            RunUntilConditionCalled = true;
+            throw new NotSupportedException();
+        }
+
         public DebugResult<BreakpointSetResult> SetBreakpoint(ushort address, string? condition)
         {
             SetBreakpointCalled = true;
@@ -421,6 +642,15 @@ public sealed class McpToolValidationTests
             return SetWatchpointResult;
         }
 
+        public DebugResult<WatchpointSetResult> SetWatchpointRange(ushort address, int length, WatchpointMode mode)
+        {
+            SetWatchpointRangeCalled = true;
+            LastWatchpointAddress = address;
+            LastWatchpointLength = length;
+            LastWatchpointMode = mode;
+            return SetWatchpointRangeResult;
+        }
+
         public DebugResult<ClearWatchpointResult> ClearWatchpoint(string watchpointId) => throw new NotSupportedException();
 
         public DebugResult<ListWatchpointsResult> ListWatchpoints() => throw new NotSupportedException();
@@ -431,7 +661,7 @@ public sealed class McpToolValidationTests
             return GetStateResult;
         }
 
-        public DebugResult<CpuRegisters> ReadRegisters() => throw new NotSupportedException();
+        public DebugResult<CpuRegisters> ReadRegisters() => ReadRegistersResult;
 
         public DebugResult<MemoryReadResult> ReadMemory(ushort address, int length)
         {
@@ -447,7 +677,7 @@ public sealed class McpToolValidationTests
 
         public DebugResult<OamDumpResult> ReadOam() => throw new NotSupportedException();
 
-        public DebugResult<PpuStateResult> ReadPpuState() => throw new NotSupportedException();
+        public DebugResult<PpuStateResult> ReadPpuState() => ReadPpuStateResult;
 
         public DebugResult<ScreenCaptureResult> CaptureScreen()
         {
@@ -457,7 +687,15 @@ public sealed class McpToolValidationTests
 
         public DebugResult<LastWriterResult> FindLastWriter(ushort address) => throw new NotSupportedException();
 
+        public DebugResult<LastWritersResult> FindLastWriters(ushort address, int length) => throw new NotSupportedException();
+
         public DebugResult<TraceUntilWriteResult> TraceUntilWrite(ushort address, int maxInstructions) => throw new NotSupportedException();
+
+        public DebugResult<TraceUntilWriteRangeResult> TraceUntilWriteRange(ushort address, int length, int maxInstructions)
+        {
+            TraceUntilWriteRangeCalled = true;
+            throw new NotSupportedException();
+        }
 
         public DebugResult<TilemapDumpResult> DumpTilemap(ushort address) => throw new NotSupportedException();
 
@@ -468,5 +706,18 @@ public sealed class McpToolValidationTests
         public DebugResult<ResolveSymbolResult> ResolveSymbol(string name) => throw new NotSupportedException();
 
         public DebugResult<ReadSymbolResult> ReadSymbol(string name, int? length) => throw new NotSupportedException();
+
+        public DebugResult<ScreenRegionResult> ReadScreenRegion(int x, int y, int width, int height, string format)
+        {
+            ReadScreenRegionCalled = true;
+            throw new NotSupportedException();
+        }
+
+        public DebugResult<InputTimelineResult> RunInputTimeline(IReadOnlyList<InputTimelineStep> steps)
+        {
+            RunInputTimelineCalled = true;
+            LastInputTimelineSteps = steps.ToArray();
+            return RunInputTimelineResult;
+        }
     }
 }

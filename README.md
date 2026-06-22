@@ -41,7 +41,7 @@ From the repo root:
 dotnet run --project src/GameBoy.Debug.Mcp/GameBoy.Debug.Mcp.csproj
 ```
 
-Screen captures are returned inline as PNG images over MCP; no files are written.
+Screen captures are returned inline as PNG images over MCP by default. Pass a safe relative `.png` path to `capture_screen` when you want a file artifact written under the current working directory.
 
 ## Connect An MCP Client
 
@@ -94,7 +94,9 @@ Implemented tools:
 - `step_instruction`
 - `step_over`
 - `step_out`
+- `run_until_condition`
 - `run_frame`
+- `run_input_timeline`
 - `set_joypad`
 - `press_buttons`
 - `continue_until_break`
@@ -104,6 +106,7 @@ Implemented tools:
 - `set_watchpoint`
 - `clear_watchpoint`
 - `list_watchpoints`
+- `set_watchpoint_range`
 - `get_state`
 - `read_registers`
 - `read_memory`
@@ -115,8 +118,11 @@ Implemented tools:
 - `dump_oam`
 - `read_ppu_state`
 - `capture_screen`
+- `read_screen_region`
 - `find_last_writer`
+- `find_last_writers`
 - `trace_until_write`
+- `trace_until_write_range`
 - `dump_tilemap`
 - `dump_tileset`
 
@@ -125,9 +131,9 @@ See [docs/mcp-tools.md](docs/mcp-tools.md) for schemas and examples.
 ## Current Limitations
 
 - The managed core skips the external boot ROM and applies a standard post-boot register state. This is deterministic and practical for debugging, but it is not a boot-ROM-accurate startup trace.
-- Conditional breakpoints are evaluated by the C# session loop and support register and memory comparisons such as `A == 0x10`, `HL >= 0xC000`, and `[HL] < 4`.
+- Conditional breakpoints and `run_until_condition` are evaluated by the C# session loop and support register, PPU/IO alias, and memory comparisons such as `A == 0x10`, `LY >= 0x90`, `SCX == 4`, `HL >= 0xC000`, and `[HL] < 4`.
 - `.sym` parsing is intentionally simple: `BANK:ADDR Name` and `ADDR Name` lines with `;` or `#` comments.
-- `capture_screen` returns inline PNG image content.
+- `capture_screen` returns inline PNG image content unless a safe relative `.png` artifact path is provided.
 - Savestates capture CPU registers and all CPU-visible RAM/IO; MBC bank selection and sub-frame PPU/APU timing are not captured, so save/restore is intended at frame boundaries.
 
 ## Emulator Core

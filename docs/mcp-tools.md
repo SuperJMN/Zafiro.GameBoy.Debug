@@ -1,6 +1,6 @@
 # MCP Tools
 
-All addresses are hexadecimal strings. Inputs are bounded; trace-like tools require explicit limits.
+All addresses are hexadecimal strings. Inputs are bounded; trace-like tools require explicit limits. Execution and state results include a `timeline` object with cumulative `frames`, `cycles`, and `instructions` since the last ROM load or reset.
 
 ## load_rom
 
@@ -73,7 +73,9 @@ Output:
   "pcBefore": "0x0100",
   "pcAfter": "0x0101",
   "registers": {},
-  "disassembly": "0x0100: NOP"
+  "disassembly": "0x0100: NOP",
+  "instructionsRun": 1,
+  "timeline": { "frames": 0, "cycles": 4, "instructions": 1 }
 }
 ```
 
@@ -88,10 +90,10 @@ Input:
 Output:
 
 ```json
-{ "framesRun": 1, "registers": {}, "hitBreakpoint": false }
+{ "framesRun": 1, "registers": {}, "hitBreakpoint": false, "timeline": { "frames": 1, "cycles": 70224, "instructions": 0 } }
 ```
 
-`run_frame` may stop before the requested frame count when a watchpoint is hit. The result shape is unchanged; inspect the current registers after the call if execution stopped early.
+`run_frame` may stop before the requested frame count when a watchpoint is hit.
 
 ## step_over
 
@@ -104,7 +106,7 @@ Input:
 Output:
 
 ```json
-{ "stopped": true, "reason": "step_over", "pc": "0x0103", "registers": {} }
+{ "stopped": true, "reason": "step_over", "pc": "0x0103", "registers": {}, "timeline": {}, "instructionsRun": 4 }
 ```
 
 If the current instruction is a `CALL` or `RST`, this runs until execution returns to the instruction after it. Otherwise it steps a single instruction and returns reason `step`. Other reasons: `breakpoint`, `watchpoint`, `halt`, `maxInstructions`.
@@ -120,7 +122,7 @@ Input:
 Output:
 
 ```json
-{ "stopped": true, "reason": "step_out", "pc": "0x0103", "registers": {} }
+{ "stopped": true, "reason": "step_out", "pc": "0x0103", "registers": {}, "timeline": {}, "instructionsRun": 4 }
 ```
 
 Runs until the current stack frame returns. Other reasons: `breakpoint`, `watchpoint`, `halt`, `maxInstructions`.
@@ -167,6 +169,37 @@ Output:
 
 This holds the requested buttons for `frameCount` frames, then releases every button before returning. `frameCount` must be between 1 and 600.
 
+## run_input_timeline
+
+Input:
+
+```json
+{
+  "steps": [
+    { "frames": 60, "buttons": ["right"] },
+    { "frames": 4, "buttons": ["right", "a"], "capture": true },
+    { "frames": 40, "buttons": ["right"], "readPpuState": true, "dumpOam": true }
+  ]
+}
+```
+
+Output:
+
+```json
+{
+  "framesRun": 104,
+  "released": { "pressed": [] },
+  "steps": [
+    { "index": 0, "framesRun": 60, "totalFrames": 60, "buttons": ["right"], "timeline": {} },
+    { "index": 1, "framesRun": 4, "totalFrames": 64, "buttons": ["right", "a"], "screenCapture": { "mimeType": "image/png" }, "timeline": {} },
+    { "index": 2, "framesRun": 40, "totalFrames": 104, "buttons": ["right"], "ppuState": {}, "oam": {}, "timeline": {} }
+  ],
+  "timeline": {}
+}
+```
+
+Each step defines the complete held-button set for that interval. The scenario is executed atomically under the session lock and releases all buttons before returning, including failure paths. Step count, per-step frames, and total frames are bounded.
+
 ## continue_until_break
 
 Input:
@@ -182,6 +215,31 @@ Output:
 ```
 
 Reasons: `breakpoint`, `watchpoint`, `maxInstructions`, `halt`, `error`.
+
+## run_until_condition
+
+Input:
+
+```json
+{ "condition": "LY >= 0x90", "maxInstructions": 1000000, "maxFrames": 120 }
+```
+
+Output:
+
+```json
+{
+  "stopped": true,
+  "reason": "condition",
+  "pc": "0x0150",
+  "instructionsRun": 9216,
+  "framesRun": 1,
+  "registers": {},
+  "ppuState": { "ly": "0x90", "stat": "0x85" },
+  "timeline": {}
+}
+```
+
+Reasons: `condition`, `breakpoint`, `watchpoint`, `halt`, `maxInstructions`, and `maxFrames`. The condition grammar is the same comparison grammar used by conditional breakpoints.
 
 ## set_breakpoint
 
@@ -205,12 +263,13 @@ Supported condition grammar is a single comparison:
 <left> <operator> <constant>
 ```
 
-- Left operands: 8-bit registers `A B C D E F H L`, 16-bit registers `AF BC DE HL SP PC`, or 8-bit memory reads `[addr]` / `[reg]`.
+- Left operands: 8-bit registers `A B C D E F H L`, 16-bit registers `AF BC DE HL SP PC`, PPU/IO aliases, or 8-bit memory reads `[addr]` / `[reg]`.
+- PPU/IO aliases: `LCDC`, `STAT`, `LY`, `LYC`, `SCX`, `SCY`, `WX`, `WY`, `BGP`, `OBP0`, `OBP1`, and `VBK`.
 - Memory addresses can be decimal or `0x` hexadecimal constants; memory registers must be 16-bit registers.
 - Operators: `== != < <= > >=`.
 - Constants: decimal or `0x` hexadecimal values from `0` to `0xFFFF`.
 
-Examples: `A == 0x10`, `B != 5`, `HL >= 0xC000`, `[0xFF80] == 1`, `[HL] < 4`. Invalid conditions are rejected by `set_breakpoint`.
+Examples: `A == 0x10`, `B != 5`, `HL >= 0xC000`, `LY >= 0x90`, `STAT == 0x85`, `SCX == 4`, `[0xFF80] == 1`, `[HL] < 4`. Invalid conditions are rejected by `set_breakpoint` and `run_until_condition`.
 
 ## clear_breakpoint
 
@@ -256,10 +315,26 @@ Input:
 Output:
 
 ```json
-{ "watchpointId": "wp-1", "address": "0xC000", "mode": "write", "enabled": true }
+{ "watchpointId": "wp-1", "address": "0xC000", "mode": "write", "enabled": true, "length": 1 }
 ```
 
 Modes are `read`, `write`, or `access`. Read watchpoints also trigger on instruction fetches when the watched address is executed.
+
+## set_watchpoint_range
+
+Input:
+
+```json
+{ "address": "0x9800", "length": 32, "mode": "write" }
+```
+
+Output:
+
+```json
+{ "watchpointId": "wp-2", "address": "0x9800", "mode": "write", "enabled": true, "length": 32 }
+```
+
+Ranges must fit within `0x0000..0xFFFF` and are bounded to avoid unbounded observation. `set_watchpoint` is equivalent to a range length of 1.
 
 ## clear_watchpoint
 
@@ -288,8 +363,8 @@ Output:
 ```json
 {
   "watchpoints": [
-    { "id": "wp-1", "address": "0xC000", "mode": "write", "enabled": true },
-    { "id": "wp-2", "address": "0xD000", "mode": "access", "enabled": true }
+    { "id": "wp-1", "address": "0xC000", "mode": "write", "enabled": true, "length": 1 },
+    { "id": "wp-2", "address": "0x9800", "mode": "write", "enabled": true, "length": 32 }
   ]
 }
 ```
@@ -305,13 +380,13 @@ Input:
 Output with a ROM loaded:
 
 ```json
-{ "romLoaded": true, "title": "GAME", "model": "DMG", "halted": false, "pc": "0x0100" }
+{ "romLoaded": true, "title": "GAME", "model": "DMG", "halted": false, "pc": "0x0100", "timeline": { "frames": 0, "cycles": 0, "instructions": 0 } }
 ```
 
 Output before loading a ROM:
 
 ```json
-{ "romLoaded": false, "title": null, "model": null, "halted": false, "pc": null }
+{ "romLoaded": false, "title": null, "model": null, "halted": false, "pc": null, "timeline": { "frames": 0, "cycles": 0, "instructions": 0 } }
 ```
 
 ## read_registers
@@ -502,6 +577,33 @@ Output content:
 }
 ```
 
+Saved artifact input:
+
+```json
+{ "path": "artifacts/runner-frame-120.png", "includeMetadata": true }
+```
+
+Saved artifact output:
+
+```json
+{
+  "width": 160,
+  "height": 144,
+  "mimeType": "image/png",
+  "saved": true,
+  "path": "artifacts/runner-frame-120.png",
+  "metadata": {
+    "timeline": { "frames": 120, "cycles": 8426880, "instructions": 12345 },
+    "registers": {},
+    "ppuState": {},
+    "romTitle": "GAME",
+    "model": "DMG"
+  }
+}
+```
+
+Without `path`, `capture_screen` keeps returning inline image content and writes no files. Saved paths must be relative `.png` paths that stay within the current working directory; absolute paths and `..` escapes are rejected.
+
 ## find_last_writer
 
 Input:
@@ -517,6 +619,27 @@ Output:
 ```
 
 This reports writes observed after the session started. It is not a time-travel query for writes that happened before the backend was running.
+
+## find_last_writers
+
+Input:
+
+```json
+{ "address": "0x9800", "length": 32 }
+```
+
+Output:
+
+```json
+{
+  "writers": [
+    { "found": true, "address": "0x9800", "pc": "0x1234", "value": "0x2A", "writeCount": 1 },
+    { "found": false, "address": "0x9801", "pc": null, "value": null, "writeCount": 0 }
+  ]
+}
+```
+
+The range is bounded and must fit within `0x0000..0xFFFF`.
 
 ## trace_until_write
 
@@ -536,11 +659,68 @@ Output:
   "pc": "0x0105",
   "value": "0x2A",
   "instructionsRun": 12,
-  "registers": {}
+  "registers": {},
+  "timeline": {}
 }
 ```
 
 Reasons: `write`, `maxInstructions`.
+
+## trace_until_write_range
+
+Input:
+
+```json
+{ "address": "0x9800", "length": 32, "maxInstructions": 1000000 }
+```
+
+Output:
+
+```json
+{
+  "stopped": true,
+  "reason": "write",
+  "address": "0x9800",
+  "length": 32,
+  "hitAddress": "0x9812",
+  "pc": "0x1234",
+  "value": "0x2A",
+  "instructionsRun": 4096,
+  "registers": {},
+  "ppuState": {},
+  "disassembly": { "instructions": [] },
+  "timeline": {}
+}
+```
+
+Reasons: `write`, `maxInstructions`. The result reports the concrete address hit inside the requested range.
+
+## read_screen_region
+
+Input:
+
+```json
+{ "x": 0, "y": 0, "width": 160, "height": 32, "format": "dmg_shades" }
+```
+
+Output:
+
+```json
+{
+  "x": 0,
+  "y": 0,
+  "width": 160,
+  "height": 32,
+  "format": "dmg_shades",
+  "pixelCount": 5120,
+  "values": null,
+  "histogram": { "0": 4700, "1": 300, "2": 120, "3": 0 },
+  "rowHashes": ["0x0D58A2C1"],
+  "screenToBgTile": { "tileX": 0, "tileY": 0, "tilemapAddress": "0x9800" }
+}
+```
+
+Small regions include raw shade values in `values`; larger regions return deterministic histogram and row hash summaries for automated visual assertions. Bounds must fit within the 160x144 screen.
 
 ## dump_tilemap
 

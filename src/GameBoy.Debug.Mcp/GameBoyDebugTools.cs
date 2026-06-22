@@ -15,6 +15,11 @@ public static class GameBoyDebugTools
     private const int MaxContinueInstructions = 10_000_000;
     private const int MaxTraceInstructions = 10_000_000;
     private const int MaxTileCount = 384;
+    private const int MaxWatchpointRangeLength = 4096;
+    private const int MaxInputTimelineSteps = 128;
+    private const int MaxInputTimelineFrames = 3600;
+    private const int ScreenWidth = 160;
+    private const int ScreenHeight = 144;
     private static readonly IReadOnlyDictionary<string, JoypadButton> ButtonNames =
         new Dictionary<string, JoypadButton>(StringComparer.OrdinalIgnoreCase)
         {
@@ -153,6 +158,28 @@ public static class GameBoyDebugTools
         return ToToolResult(session.StepOut(maxInstructions));
     }
 
+    [McpServerTool(Name = "run_until_condition", ReadOnly = false, Destructive = false)]
+    [Description("Runs until a register, PPU/IO alias, or memory condition is true, or a bounded stop condition is reached.")]
+    public static object RunUntilCondition(IGameBoyDebugSession session, string condition, int maxInstructions = 1_000_000, int maxFrames = 120)
+    {
+        if (maxInstructions is < 1 or > MaxContinueInstructions)
+        {
+            return Error("invalid_max_instructions", $"maxInstructions must be between 1 and {MaxContinueInstructions}.");
+        }
+
+        if (maxFrames is < 1 or > MaxFrameCount)
+        {
+            return Error("invalid_max_frames", $"maxFrames must be between 1 and {MaxFrameCount}.");
+        }
+
+        if (!BreakpointCondition.TryParse(condition, out var parsed, out var conditionError) || parsed is null)
+        {
+            return Error("invalid_condition", $"Invalid condition: {conditionError ?? "Condition is required."}");
+        }
+
+        return ToToolResult(session.RunUntilCondition(condition, maxInstructions, maxFrames));
+    }
+
     [McpServerTool(Name = "set_breakpoint", ReadOnly = false, Destructive = false)]
     [Description("Sets an execution breakpoint at a 16-bit CPU address.")]
     public static object SetBreakpoint(IGameBoyDebugSession session, string address, string? condition = null)
@@ -200,6 +227,28 @@ public static class GameBoyDebugTools
         var parsedMode = ParseWatchpointMode(mode);
         return parsedMode.IsSuccess
             ? ToToolResult(session.SetWatchpoint(parsed.Value.Address, parsedMode.Value))
+            : new ToolError(parsedMode.Error!);
+    }
+
+    [McpServerTool(Name = "set_watchpoint_range", ReadOnly = false, Destructive = false)]
+    [Description("Sets a bounded memory watchpoint range. mode is read, write, or access.")]
+    public static object SetWatchpointRange(IGameBoyDebugSession session, string address, int length, string mode = "write")
+    {
+        var parsed = ParseAddress(address);
+        if (!parsed.IsSuccess)
+        {
+            return new ToolError(parsed.Error!);
+        }
+
+        var range = ValidateAddressRange(parsed.Value.Address, length, MaxWatchpointRangeLength);
+        if (!range.IsSuccess)
+        {
+            return new ToolError(range.Error!);
+        }
+
+        var parsedMode = ParseWatchpointMode(mode);
+        return parsedMode.IsSuccess
+            ? ToToolResult(session.SetWatchpointRange(parsed.Value.Address, length, parsedMode.Value))
             : new ToolError(parsedMode.Error!);
     }
 
@@ -327,9 +376,34 @@ public static class GameBoyDebugTools
     public static object ReadPpuState(IGameBoyDebugSession session) => ToToolResult(session.ReadPpuState());
 
     [McpServerTool(Name = "capture_screen", ReadOnly = true, Destructive = false)]
-    [Description("Captures the current 160x144 screen image as inline PNG image content.")]
-    public static object CaptureScreen(IGameBoyDebugSession session)
+    [Description("Captures the current 160x144 screen image as inline PNG image content, or saves it to a safe relative PNG path.")]
+    public static object CaptureScreen(IGameBoyDebugSession session, string? path = null, bool includeMetadata = false)
     {
+        if (!string.IsNullOrWhiteSpace(path))
+        {
+            var safePath = ResolveSafeArtifactPath(path);
+            if (!safePath.IsSuccess)
+            {
+                return new ToolError(safePath.Error!);
+            }
+
+            var savedCapture = session.CaptureScreen();
+            if (!savedCapture.IsSuccess)
+            {
+                return new ToolError(savedCapture.Error!);
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(safePath.Value.FullPath)!);
+            File.WriteAllBytes(safePath.Value.FullPath, savedCapture.Value.Data);
+            return new ScreenCaptureArtifactResult(
+                savedCapture.Value.Width,
+                savedCapture.Value.Height,
+                savedCapture.Value.MimeType,
+                true,
+                safePath.Value.RelativePath,
+                includeMetadata ? BuildCaptureMetadata(session) : null);
+        }
+
         var result = session.CaptureScreen();
         return result.IsSuccess
             ? ImageContentBlock.FromBytes(result.Value.Data, result.Value.MimeType)
@@ -346,6 +420,22 @@ public static class GameBoyDebugTools
             : new ToolError(parsed.Error!);
     }
 
+    [McpServerTool(Name = "find_last_writers", ReadOnly = true, Destructive = false)]
+    [Description("Returns the last observed writes in a bounded address range.")]
+    public static object FindLastWriters(IGameBoyDebugSession session, string address, int length)
+    {
+        var parsed = ParseAddress(address);
+        if (!parsed.IsSuccess)
+        {
+            return new ToolError(parsed.Error!);
+        }
+
+        var range = ValidateAddressRange(parsed.Value.Address, length, MaxWatchpointRangeLength);
+        return range.IsSuccess
+            ? ToToolResult(session.FindLastWriters(parsed.Value.Address, length))
+            : new ToolError(range.Error!);
+    }
+
     [McpServerTool(Name = "trace_until_write", ReadOnly = false, Destructive = false)]
     [Description("Runs until the requested address is written or the explicit instruction limit is reached.")]
     public static object TraceUntilWrite(IGameBoyDebugSession session, string address, int maxInstructions)
@@ -359,6 +449,120 @@ public static class GameBoyDebugTools
         return parsed.IsSuccess
             ? ToToolResult(session.TraceUntilWrite(parsed.Value.Address, maxInstructions))
             : new ToolError(parsed.Error!);
+    }
+
+    [McpServerTool(Name = "trace_until_write_range", ReadOnly = false, Destructive = false)]
+    [Description("Runs until any address in a bounded range is written or the explicit instruction limit is reached.")]
+    public static object TraceUntilWriteRange(IGameBoyDebugSession session, string address, int length, int maxInstructions)
+    {
+        if (maxInstructions is < 1 or > MaxTraceInstructions)
+        {
+            return Error("invalid_max_instructions", $"maxInstructions must be between 1 and {MaxTraceInstructions}.");
+        }
+
+        var parsed = ParseAddress(address);
+        if (!parsed.IsSuccess)
+        {
+            return new ToolError(parsed.Error!);
+        }
+
+        var range = ValidateAddressRange(parsed.Value.Address, length, MaxWatchpointRangeLength);
+        return range.IsSuccess
+            ? ToToolResult(session.TraceUntilWriteRange(parsed.Value.Address, length, maxInstructions))
+            : new ToolError(range.Error!);
+    }
+
+    [McpServerTool(Name = "read_screen_region", ReadOnly = true, Destructive = false)]
+    [Description("Reads deterministic shade data and summaries from a bounded screen region.")]
+    public static object ReadScreenRegion(IGameBoyDebugSession session, int x, int y, int width, int height, string format = "dmg_shades")
+    {
+        if (x < 0 || y < 0 || width < 1 || height < 1 || x + width > ScreenWidth || y + height > ScreenHeight)
+        {
+            return Error("invalid_screen_region", "Screen region must fit within 160x144.");
+        }
+
+        if (!format.Equals("dmg_shades", StringComparison.OrdinalIgnoreCase))
+        {
+            return Error("invalid_screen_region_format", "format must be dmg_shades.");
+        }
+
+        return ToToolResult(session.ReadScreenRegion(x, y, width, height, format));
+    }
+
+    [McpServerTool(Name = "run_input_timeline", ReadOnly = false, Destructive = false)]
+    [Description("Runs a bounded deterministic sequence of complete held-button frame steps atomically.")]
+    public static object RunInputTimeline(IGameBoyDebugSession session, InputTimelineStep[] steps)
+    {
+        if (steps is null || steps.Length is < 1 or > MaxInputTimelineSteps)
+        {
+            return Error("invalid_steps", $"steps must contain between 1 and {MaxInputTimelineSteps} entries.");
+        }
+
+        var totalFrames = 0;
+        var normalized = new List<InputTimelineStep>(steps.Length);
+        foreach (var step in steps)
+        {
+            if (step.Frames is < 1 or > MaxFrameCount)
+            {
+                return Error("invalid_frame_count", $"Each step frames value must be between 1 and {MaxFrameCount}.");
+            }
+
+            totalFrames += step.Frames;
+            if (totalFrames > MaxInputTimelineFrames)
+            {
+                return Error("invalid_total_frames", $"The scenario must run at most {MaxInputTimelineFrames} frames.");
+            }
+
+            var buttons = ParseButtons(step.Buttons);
+            if (!buttons.IsSuccess)
+            {
+                return new ToolError(buttons.Error!);
+            }
+
+            if (step.MemoryLength is < 1 or > MaxMemoryLength)
+            {
+                return Error("invalid_length", $"Memory observation length must be between 1 and {MaxMemoryLength} bytes.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(step.MemoryAddress))
+            {
+                var parsedMemory = ParseAddress(step.MemoryAddress);
+                if (!parsedMemory.IsSuccess)
+                {
+                    return new ToolError(parsedMemory.Error!);
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(step.TilemapAddress))
+            {
+                var parsedTilemap = ParseAddress(step.TilemapAddress);
+                if (!parsedTilemap.IsSuccess)
+                {
+                    return new ToolError(parsedTilemap.Error!);
+                }
+
+                if (parsedTilemap.Value.Address is not (0x9800 or 0x9C00))
+                {
+                    return Error("invalid_tilemap_address", "Tilemap address must be 0x9800 or 0x9C00.");
+                }
+            }
+
+            normalized.Add(new InputTimelineStep
+            {
+                Frames = step.Frames,
+                Buttons = buttons.Value.Select(ToButtonName).ToArray(),
+                ReadRegisters = step.ReadRegisters,
+                ReadPpuState = step.ReadPpuState,
+                DumpOam = step.DumpOam,
+                Capture = step.Capture,
+                DumpTilemap = step.DumpTilemap,
+                TilemapAddress = step.TilemapAddress,
+                MemoryAddress = step.MemoryAddress,
+                MemoryLength = step.MemoryLength,
+            });
+        }
+
+        return ToToolResult(session.RunInputTimeline(normalized));
     }
 
     [McpServerTool(Name = "dump_tilemap", ReadOnly = true, Destructive = false)]
@@ -420,6 +624,73 @@ public static class GameBoyDebugTools
         };
     }
 
+    private static DebugResult<bool> ValidateAddressRange(ushort address, int length, int maxLength)
+    {
+        if (length is < 1)
+        {
+            return DebugResult<bool>.Failure("invalid_range_length", "Range length must be positive.");
+        }
+
+        if (length > maxLength)
+        {
+            return DebugResult<bool>.Failure("invalid_range_length", $"Range length must be at most {maxLength} bytes.");
+        }
+
+        if (address + length > 0x10000)
+        {
+            return DebugResult<bool>.Failure("invalid_range", "Address range must fit within 0x0000..0xFFFF.");
+        }
+
+        return DebugResult<bool>.Success(true);
+    }
+
+    private static DebugResult<SafeArtifactPath> ResolveSafeArtifactPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return DebugResult<SafeArtifactPath>.Failure("invalid_artifact_path", "Artifact path is required.");
+        }
+
+        if (Path.IsPathRooted(path))
+        {
+            return DebugResult<SafeArtifactPath>.Failure("invalid_artifact_path", "Artifact path must be relative.");
+        }
+
+        if (!Path.GetExtension(path).Equals(".png", StringComparison.OrdinalIgnoreCase))
+        {
+            return DebugResult<SafeArtifactPath>.Failure("invalid_artifact_path", "Screen capture artifact path must end in .png.");
+        }
+
+        var root = Path.GetFullPath(Environment.CurrentDirectory);
+        var fullPath = Path.GetFullPath(path, root);
+        if (!fullPath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal) && fullPath != root)
+        {
+            return DebugResult<SafeArtifactPath>.Failure("invalid_artifact_path", "Artifact path must stay within the current working directory.");
+        }
+
+        var relative = Path.GetRelativePath(root, fullPath).Replace(Path.DirectorySeparatorChar, '/');
+        if (relative.StartsWith("..", StringComparison.Ordinal))
+        {
+            return DebugResult<SafeArtifactPath>.Failure("invalid_artifact_path", "Artifact path must stay within the current working directory.");
+        }
+
+        return DebugResult<SafeArtifactPath>.Success(new SafeArtifactPath(fullPath, relative));
+    }
+
+    private static ScreenCaptureMetadata BuildCaptureMetadata(IGameBoyDebugSession session)
+    {
+        var state = session.GetState();
+        var registers = session.ReadRegisters();
+        var ppu = session.ReadPpuState();
+
+        return new ScreenCaptureMetadata(
+            state.IsSuccess ? state.Value.Timeline : new TimelineCounters(0, 0),
+            registers.IsSuccess ? registers.Value : null,
+            ppu.IsSuccess ? ppu.Value : null,
+            state.IsSuccess ? state.Value.Title : null,
+            state.IsSuccess ? state.Value.Model : null);
+    }
+
     private static DebugResult<IReadOnlyList<JoypadButton>> ParseButtons(IReadOnlyList<string>? buttons)
     {
         if (buttons is null)
@@ -449,9 +720,24 @@ public static class GameBoyDebugTools
         return DebugResult<IReadOnlyList<JoypadButton>>.Success(CanonicalButtons.Where(selected.Contains).ToArray());
     }
 
+    private static string ToButtonName(JoypadButton button) => button switch
+    {
+        JoypadButton.Right => "right",
+        JoypadButton.Left => "left",
+        JoypadButton.Up => "up",
+        JoypadButton.Down => "down",
+        JoypadButton.A => "a",
+        JoypadButton.B => "b",
+        JoypadButton.Select => "select",
+        JoypadButton.Start => "start",
+        _ => throw new ArgumentOutOfRangeException(nameof(button), button, null),
+    };
+
     private static object ToToolResult<T>(DebugResult<T> result) => result.IsSuccess ? result.Value! : new ToolError(result.Error!);
 
     private static ToolError Error(string code, string message) => new(new DebugError(code, message));
+
+    private sealed record SafeArtifactPath(string FullPath, string RelativePath);
 
     private static readonly JoypadButton[] CanonicalButtons =
     [

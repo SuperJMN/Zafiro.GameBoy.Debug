@@ -130,6 +130,188 @@ public sealed class ManagedGameBoyDebugSessionIntegrationTests
     }
 
     [Fact]
+    public void Timeline_counters_progress_with_frames_and_reset_with_rom()
+    {
+        var romPath = CreateTestFilePath("managed-timeline", ".gb");
+        CreateMinimalRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+
+            var initial = session.GetState();
+            Assert.True(initial.IsSuccess, initial.Error?.Message);
+            Assert.Equal(0UL, initial.Value.Timeline.Frames);
+            Assert.Equal(0UL, initial.Value.Timeline.Cycles);
+
+            var run = session.RunFrame(2);
+            Assert.True(run.IsSuccess, run.Error?.Message);
+            Assert.Equal(2, run.Value.FramesRun);
+            Assert.Equal(2UL, run.Value.Timeline.Frames);
+            Assert.True(run.Value.Timeline.Cycles >= 140448);
+
+            var step = session.StepInstruction(1);
+            Assert.True(step.IsSuccess, step.Error?.Message);
+            Assert.Equal(1, step.Value.InstructionsRun);
+            Assert.True(step.Value.Timeline.Cycles > run.Value.Timeline.Cycles);
+
+            Assert.True(session.Reset().IsSuccess);
+            var resetState = session.GetState();
+            Assert.Equal(0UL, resetState.Value.Timeline.Frames);
+            Assert.Equal(0UL, resetState.Value.Timeline.Cycles);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Run_until_condition_stops_on_memory_predicate_and_reports_ppu_state()
+    {
+        var romPath = CreateTestFilePath("managed-condition", ".gb");
+        CreateMinimalRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+
+            var result = session.RunUntilCondition("[0xC000] == 0x2A", maxInstructions: 16, maxFrames: 1);
+
+            Assert.True(result.IsSuccess, result.Error?.Message);
+            Assert.Equal("condition", result.Value.Reason);
+            Assert.Equal("0x0105", result.Value.Pc);
+            Assert.True(result.Value.InstructionsRun > 0);
+            Assert.StartsWith("0x", result.Value.PpuState.Ly, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Trace_until_write_range_reports_concrete_hit_address_and_last_writers()
+    {
+        var romPath = CreateTestFilePath("managed-range-trace", ".gb");
+        CreateMinimalRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+
+            var trace = session.TraceUntilWriteRange(0xBFFF, length: 4, maxInstructions: 16);
+
+            Assert.True(trace.IsSuccess, trace.Error?.Message);
+            Assert.Equal("write", trace.Value.Reason);
+            Assert.Equal("0xBFFF", trace.Value.Address);
+            Assert.Equal("0xC000", trace.Value.HitAddress);
+            Assert.Equal("0x2A", trace.Value.Value);
+            Assert.NotEmpty(trace.Value.Disassembly.Instructions);
+
+            var lastWriters = session.FindLastWriters(0xBFFF, 4);
+            Assert.True(lastWriters.IsSuccess, lastWriters.Error?.Message);
+            var writer = Assert.Single(lastWriters.Value.Writers, item => item.Found);
+            Assert.Equal("0xC000", writer.Address);
+            Assert.Equal("0x2A", writer.Value);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Watchpoint_range_stops_continue_when_write_falls_inside_range()
+    {
+        var romPath = CreateTestFilePath("managed-range-watchpoint", ".gb");
+        CreateMinimalRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+
+            var watchpoint = session.SetWatchpointRange(0xBFFF, length: 4, WatchpointMode.Write);
+            Assert.True(watchpoint.IsSuccess, watchpoint.Error?.Message);
+            Assert.Equal(4, watchpoint.Value.Length);
+
+            var continued = session.ContinueUntilBreak(16);
+
+            Assert.True(continued.IsSuccess, continued.Error?.Message);
+            Assert.Equal("watchpoint", continued.Value.Reason);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Read_screen_region_returns_raw_small_region_and_summary_for_large_region()
+    {
+        var romPath = CreateTestFilePath("managed-screen-region", ".gb");
+        CreateMinimalRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+            Assert.True(session.RunFrame(1).IsSuccess);
+
+            var small = session.ReadScreenRegion(0, 0, 2, 2, "dmg_shades");
+            Assert.True(small.IsSuccess, small.Error?.Message);
+            Assert.Equal(4, small.Value.Values?.Count);
+            Assert.NotEmpty(small.Value.Histogram);
+
+            var large = session.ReadScreenRegion(0, 0, 160, 32, "dmg_shades");
+            Assert.True(large.IsSuccess, large.Error?.Message);
+            Assert.Null(large.Value.Values);
+            Assert.Equal(32, large.Value.RowHashes.Count);
+            Assert.Equal(5120, large.Value.PixelCount);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Input_timeline_runs_steps_collects_observations_and_releases_buttons()
+    {
+        var romPath = CreateTestFilePath("managed-input-timeline", ".gb");
+        CreateMinimalRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+
+            var result = session.RunInputTimeline(
+            [
+                new InputTimelineStep { Frames = 1, Buttons = ["right"], ReadRegisters = true },
+                new InputTimelineStep { Frames = 1, Buttons = ["right", "a"], ReadPpuState = true, DumpOam = true },
+            ]);
+
+            Assert.True(result.IsSuccess, result.Error?.Message);
+            Assert.Equal(2, result.Value.FramesRun);
+            Assert.Empty(result.Value.Released.Pressed);
+            Assert.Equal(2, result.Value.Steps.Count);
+            Assert.Equal(["right"], result.Value.Steps[0].Buttons);
+            Assert.NotNull(result.Value.Steps[0].Registers);
+            Assert.NotNull(result.Value.Steps[1].PpuState);
+            Assert.NotNull(result.Value.Steps[1].Oam);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
     public void Savestate_roundtrip_restores_registers_and_memory()
     {
         var romPath = CreateTestFilePath("managed-savestate", ".gb");
@@ -141,9 +323,11 @@ public sealed class ManagedGameBoyDebugSessionIntegrationTests
             using var session = new ManagedGameBoyDebugSession();
             Assert.True(session.LoadRom(romPath).IsSuccess);
             session.WriteMemory(0xC000, Enumerable.Repeat((byte)0xA5, 16).ToArray());
+            Assert.True(session.RunFrame(1).IsSuccess);
 
             var registersBefore = session.ReadRegisters();
             var memoryBefore = session.ReadMemory(0xC000, 16);
+            var timelineBefore = session.GetState().Value.Timeline;
 
             var saved = session.SaveState(statePath);
             Assert.True(saved.IsSuccess, saved.Error?.Message);
@@ -158,6 +342,7 @@ public sealed class ManagedGameBoyDebugSessionIntegrationTests
 
             Assert.Equal(registersBefore.Value, session.ReadRegisters().Value);
             Assert.Equal(memoryBefore.Value.BytesHex, session.ReadMemory(0xC000, 16).Value.BytesHex);
+            Assert.Equal(timelineBefore, session.GetState().Value.Timeline);
         }
         finally
         {

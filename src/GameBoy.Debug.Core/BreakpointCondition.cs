@@ -12,6 +12,22 @@ public interface IBreakpointConditionContext
 public sealed class BreakpointCondition
 {
     private static readonly string[] Operators = ["==", "!=", "<=", ">=", "<", ">"];
+    private static readonly IReadOnlyDictionary<string, ushort> IoAliases =
+        new Dictionary<string, ushort>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["LCDC"] = 0xFF40,
+            ["STAT"] = 0xFF41,
+            ["SCY"] = 0xFF42,
+            ["SCX"] = 0xFF43,
+            ["LY"] = 0xFF44,
+            ["LYC"] = 0xFF45,
+            ["BGP"] = 0xFF47,
+            ["OBP0"] = 0xFF48,
+            ["OBP1"] = 0xFF49,
+            ["WY"] = 0xFF4A,
+            ["WX"] = 0xFF4B,
+            ["VBK"] = 0xFF4F,
+        };
 
     private readonly LeftOperand left;
     private readonly ComparisonOperator comparisonOperator;
@@ -142,7 +158,13 @@ public sealed class BreakpointCondition
             return true;
         }
 
-        errorMessage = "Left operand must be a register or memory operand.";
+        if (IoAliases.TryGetValue(text, out var aliasAddress))
+        {
+            operand = LeftOperand.MemoryAddress(aliasAddress);
+            return true;
+        }
+
+        errorMessage = "Left operand must be a register, PPU/IO alias, or memory operand.";
         return false;
     }
 

@@ -23,6 +23,7 @@ namespace GameBoy.Debug.Emulator
         private const int ScreenHeight = FrameBufferDisplay.Height;
         private const int MaxStepCycles = 1_000_000;
         private const int CyclesPerFrame = 70224;
+        private const int MaxRawScreenRegionPixels = 1024;
         private const uint StateMagic = 0x31534D47; // "GMS1"
 
         private static readonly (int Start, int Length)[] StateRegions =
@@ -49,6 +50,19 @@ namespace GameBoy.Debug.Emulator
                 [JoypadButton.Start] = Button.Start,
             };
 
+        private static readonly IReadOnlyDictionary<string, JoypadButton> ButtonNames =
+            new Dictionary<string, JoypadButton>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["right"] = JoypadButton.Right,
+                ["left"] = JoypadButton.Left,
+                ["up"] = JoypadButton.Up,
+                ["down"] = JoypadButton.Down,
+                ["a"] = JoypadButton.A,
+                ["b"] = JoypadButton.B,
+                ["select"] = JoypadButton.Select,
+                ["start"] = JoypadButton.Start,
+            };
+
         private static readonly JoypadButton[] CanonicalButtons =
         {
             JoypadButton.Right, JoypadButton.Left, JoypadButton.Up, JoypadButton.Down,
@@ -71,6 +85,9 @@ namespace GameBoy.Debug.Emulator
         private bool trackReads;
         private WatchHit? watchHit;
         private bool disposed;
+        private ulong totalCycles;
+        private ulong totalFrames;
+        private ulong totalInstructions;
 
         public DebugResult<LoadRomResult> LoadRom(string path)
         {
@@ -112,6 +129,9 @@ namespace GameBoy.Debug.Emulator
             trackWrites = true;
             trackReads = false;
             watchHit = null;
+            totalCycles = 0;
+            totalFrames = 0;
+            totalInstructions = 0;
             romPath = path;
             romTitle = cartridge.Title;
             romModel = cartridge.Gbc ? "CGB" : "DMG";
@@ -165,7 +185,7 @@ namespace GameBoy.Debug.Emulator
                 ? string.Join('\n', disassembly.Value.Instructions.Select(instruction => $"{instruction.Address}: {instruction.Text}"))
                 : "";
 
-            return DebugResult<StepInstructionResult>.Success(new StepInstructionResult(before.Value.Pc, after.Value.Pc, after.Value, text));
+            return DebugResult<StepInstructionResult>.Success(new StepInstructionResult(before.Value.Pc, after.Value.Pc, after.Value, text, count, GetTimeline()));
         }
 
         public DebugResult<RunFrameResult> RunFrame(int count)
@@ -211,7 +231,7 @@ namespace GameBoy.Debug.Emulator
                 return DebugResult<RunFrameResult>.Failure(hit.Error!.Code, hit.Error.Message);
             }
 
-            return DebugResult<RunFrameResult>.Success(new RunFrameResult(framesRun, registers.Value, hit.Value));
+            return DebugResult<RunFrameResult>.Success(new RunFrameResult(framesRun, registers.Value, hit.Value, GetTimeline()));
         }
 
         public DebugResult<JoypadStateResult> SetJoypad(IReadOnlyList<JoypadButton> pressedButtons)
@@ -289,7 +309,7 @@ namespace GameBoy.Debug.Emulator
 
                         if (hit.Value)
                         {
-                            return Stop("breakpoint", registers.Value);
+                            return Stop("breakpoint", registers.Value, (ulong)i);
                         }
                     }
 
@@ -297,7 +317,7 @@ namespace GameBoy.Debug.Emulator
                     {
                         var halted = ReadRegisters();
                         return halted.IsSuccess
-                            ? Stop("halt", halted.Value)
+                            ? Stop("halt", halted.Value, (ulong)i)
                             : DebugResult<ContinueResult>.Failure(halted.Error!.Code, halted.Error.Message);
                     }
 
@@ -306,14 +326,14 @@ namespace GameBoy.Debug.Emulator
                     {
                         var registers = ReadRegisters();
                         return registers.IsSuccess
-                            ? Stop("watchpoint", registers.Value)
+                            ? Stop("watchpoint", registers.Value, (ulong)i + 1)
                             : DebugResult<ContinueResult>.Failure(registers.Error!.Code, registers.Error.Message);
                     }
                 }
 
                 var final = ReadRegisters();
                 return final.IsSuccess
-                    ? Stop("maxInstructions", final.Value)
+                    ? Stop("maxInstructions", final.Value, (ulong)maxInstructions)
                     : DebugResult<ContinueResult>.Failure(final.Error!.Code, final.Error.Message);
             }
             finally
@@ -321,8 +341,8 @@ namespace GameBoy.Debug.Emulator
                 DetachReadObserver();
             }
 
-            static DebugResult<ContinueResult> Stop(string reason, CpuRegisters registers) =>
-                DebugResult<ContinueResult>.Success(new ContinueResult(true, reason, registers.Pc, registers));
+            DebugResult<ContinueResult> Stop(string reason, CpuRegisters registers, ulong instructionsRun) =>
+                DebugResult<ContinueResult>.Success(new ContinueResult(true, reason, registers.Pc, registers, GetTimeline(), instructionsRun));
         }
 
         public DebugResult<ContinueResult> StepOver(int maxInstructions)
@@ -370,6 +390,104 @@ namespace GameBoy.Debug.Emulator
             return StepUntil(maxInstructions, registers => ParseWord(registers.Sp) > startSp, "step_out");
         }
 
+        public DebugResult<RunUntilConditionResult> RunUntilCondition(string condition, int maxInstructions, int maxFrames)
+        {
+            if (!romLoaded)
+            {
+                return NoRom<RunUntilConditionResult>();
+            }
+
+            if (!BreakpointCondition.TryParse(condition, out var parsedCondition, out var conditionError) || parsedCondition is null)
+            {
+                return DebugResult<RunUntilConditionResult>.Failure("invalid_condition", $"Invalid condition: {conditionError ?? "Condition is required."}");
+            }
+
+            watchHit = null;
+            var startFrames = totalFrames;
+            AttachReadObserverIfNeeded();
+            try
+            {
+                for (var i = 0; i < maxInstructions; i++)
+                {
+                    var before = ReadRegisters();
+                    if (!before.IsSuccess)
+                    {
+                        return DebugResult<RunUntilConditionResult>.Failure(before.Error!.Code, before.Error.Message);
+                    }
+
+                    var conditionResult = parsedCondition.Evaluate(new ConditionContext(this, before.Value));
+                    if (!conditionResult.IsSuccess)
+                    {
+                        return DebugResult<RunUntilConditionResult>.Failure(conditionResult.Error!.Code, conditionResult.Error.Message);
+                    }
+
+                    if (conditionResult.Value)
+                    {
+                        return StopRunUntilCondition("condition", before.Value, (uint)i, startFrames);
+                    }
+
+                    var hit = IsBreakpointHit(ParseWord(before.Value.Pc), before.Value);
+                    if (!hit.IsSuccess)
+                    {
+                        return DebugResult<RunUntilConditionResult>.Failure(hit.Error!.Code, hit.Error.Message);
+                    }
+
+                    if (hit.Value)
+                    {
+                        return StopRunUntilCondition("breakpoint", before.Value, (uint)i, startFrames);
+                    }
+
+                    if (before.Value.Halted)
+                    {
+                        return StopRunUntilCondition("halt", before.Value, (uint)i, startFrames);
+                    }
+
+                    if (totalFrames - startFrames >= (ulong)maxFrames)
+                    {
+                        return StopRunUntilCondition("maxFrames", before.Value, (uint)i, startFrames);
+                    }
+
+                    StepOnce();
+
+                    var after = ReadRegisters();
+                    if (!after.IsSuccess)
+                    {
+                        return DebugResult<RunUntilConditionResult>.Failure(after.Error!.Code, after.Error.Message);
+                    }
+
+                    conditionResult = parsedCondition.Evaluate(new ConditionContext(this, after.Value));
+                    if (!conditionResult.IsSuccess)
+                    {
+                        return DebugResult<RunUntilConditionResult>.Failure(conditionResult.Error!.Code, conditionResult.Error.Message);
+                    }
+
+                    if (conditionResult.Value)
+                    {
+                        return StopRunUntilCondition("condition", after.Value, (uint)i + 1, startFrames);
+                    }
+
+                    if (watchHit.HasValue)
+                    {
+                        return StopRunUntilCondition("watchpoint", after.Value, (uint)i + 1, startFrames);
+                    }
+
+                    if (totalFrames - startFrames >= (ulong)maxFrames)
+                    {
+                        return StopRunUntilCondition("maxFrames", after.Value, (uint)i + 1, startFrames);
+                    }
+                }
+
+                var final = ReadRegisters();
+                return final.IsSuccess
+                    ? StopRunUntilCondition("maxInstructions", final.Value, (uint)maxInstructions, startFrames)
+                    : DebugResult<RunUntilConditionResult>.Failure(final.Error!.Code, final.Error.Message);
+            }
+            finally
+            {
+                DetachReadObserver();
+            }
+        }
+
         public DebugResult<BreakpointSetResult> SetBreakpoint(ushort address, string? condition)
         {
             if (!BreakpointCondition.TryParse(condition, out var parsedCondition, out var conditionError))
@@ -402,8 +520,24 @@ namespace GameBoy.Debug.Emulator
         public DebugResult<WatchpointSetResult> SetWatchpoint(ushort address, WatchpointMode mode)
         {
             var watchpoint = watchpoints.Set(address, mode);
+            return ToWatchpointSetResult(watchpoint);
+        }
+
+        public DebugResult<WatchpointSetResult> SetWatchpointRange(ushort address, int length, WatchpointMode mode)
+        {
+            if (length < 1 || address + length > 0x10000)
+            {
+                return DebugResult<WatchpointSetResult>.Failure("invalid_range", "Watchpoint range must fit within 0x0000..0xFFFF.");
+            }
+
+            var watchpoint = watchpoints.Set(address, length, mode);
+            return ToWatchpointSetResult(watchpoint);
+        }
+
+        private static DebugResult<WatchpointSetResult> ToWatchpointSetResult(WatchpointInfo watchpoint)
+        {
             return DebugResult<WatchpointSetResult>.Success(
-                new WatchpointSetResult(watchpoint.Id, watchpoint.Address, ToWatchpointModeName(watchpoint.Mode), watchpoint.Enabled));
+                new WatchpointSetResult(watchpoint.Id, watchpoint.Address, ToWatchpointModeName(watchpoint.Mode), watchpoint.Enabled, watchpoint.Length));
         }
 
         public DebugResult<ClearWatchpointResult> ClearWatchpoint(string watchpointId)
@@ -416,7 +550,7 @@ namespace GameBoy.Debug.Emulator
         public DebugResult<ListWatchpointsResult> ListWatchpoints()
         {
             var entries = watchpoints.All
-                .Select(watchpoint => new WatchpointEntry(watchpoint.Id, watchpoint.Address, ToWatchpointModeName(watchpoint.Mode), watchpoint.Enabled))
+                .Select(watchpoint => new WatchpointEntry(watchpoint.Id, watchpoint.Address, ToWatchpointModeName(watchpoint.Mode), watchpoint.Enabled, watchpoint.Length))
                 .ToArray();
 
             return DebugResult<ListWatchpointsResult>.Success(new ListWatchpointsResult(entries));
@@ -426,13 +560,13 @@ namespace GameBoy.Debug.Emulator
         {
             if (!romLoaded)
             {
-                return DebugResult<SessionStateResult>.Success(new SessionStateResult(false, null, null, false, null));
+                return DebugResult<SessionStateResult>.Success(new SessionStateResult(false, null, null, false, null, new TimelineCounters(0, 0)));
             }
 
             var registers = ReadRegisters();
             return registers.IsSuccess
                 ? DebugResult<SessionStateResult>.Success(
-                    new SessionStateResult(true, romTitle, romModel, registers.Value.Halted, registers.Value.Pc))
+                    new SessionStateResult(true, romTitle, romModel, registers.Value.Halted, registers.Value.Pc, GetTimeline()))
                 : DebugResult<SessionStateResult>.Failure(registers.Error!.Code, registers.Error.Message);
         }
 
@@ -592,6 +726,31 @@ namespace GameBoy.Debug.Emulator
                 : DebugResult<LastWriterResult>.Success(new LastWriterResult(false, Hex.FormatWord(address), null, null, 0));
         }
 
+        public DebugResult<LastWritersResult> FindLastWriters(ushort address, int length)
+        {
+            if (!romLoaded)
+            {
+                return NoRom<LastWritersResult>();
+            }
+
+            if (length < 1 || address + length > 0x10000)
+            {
+                return DebugResult<LastWritersResult>.Failure("invalid_range", "Writer range must fit within 0x0000..0xFFFF.");
+            }
+
+            var writers = Enumerable.Range(0, length)
+                .Select(offset =>
+                {
+                    var current = (ushort)(address + offset);
+                    return lastWriters.TryGetValue(current, out var record)
+                        ? new LastWriterResult(true, Hex.FormatWord(current), Hex.FormatWord(record.Pc), Hex.FormatByte(record.Value), record.Count)
+                        : new LastWriterResult(false, Hex.FormatWord(current), null, null, 0);
+                })
+                .ToArray();
+
+            return DebugResult<LastWritersResult>.Success(new LastWritersResult(writers));
+        }
+
         public DebugResult<TraceUntilWriteResult> TraceUntilWrite(ushort address, int maxInstructions)
         {
             if (!romLoaded)
@@ -600,6 +759,7 @@ namespace GameBoy.Debug.Emulator
             }
 
             traceAddress = address;
+            traceLength = 1;
             traceHit = false;
             uint instructionsRun = 0;
             try
@@ -613,6 +773,7 @@ namespace GameBoy.Debug.Emulator
             finally
             {
                 traceAddress = -1;
+                traceLength = 0;
             }
 
             var registers = ReadRegisters();
@@ -622,8 +783,72 @@ namespace GameBoy.Debug.Emulator
             }
 
             return DebugResult<TraceUntilWriteResult>.Success(traceHit
-                ? new TraceUntilWriteResult(true, "write", Hex.FormatWord(address), Hex.FormatWord(traceHitPc), Hex.FormatByte(traceHitValue), instructionsRun, registers.Value)
-                : new TraceUntilWriteResult(true, "maxInstructions", Hex.FormatWord(address), null, null, instructionsRun, registers.Value));
+                ? new TraceUntilWriteResult(true, "write", Hex.FormatWord(address), Hex.FormatWord(traceHitPc), Hex.FormatByte(traceHitValue), instructionsRun, registers.Value, GetTimeline())
+                : new TraceUntilWriteResult(true, "maxInstructions", Hex.FormatWord(address), null, null, instructionsRun, registers.Value, GetTimeline()));
+        }
+
+        public DebugResult<TraceUntilWriteRangeResult> TraceUntilWriteRange(ushort address, int length, int maxInstructions)
+        {
+            if (!romLoaded)
+            {
+                return NoRom<TraceUntilWriteRangeResult>();
+            }
+
+            if (length < 1 || address + length > 0x10000)
+            {
+                return DebugResult<TraceUntilWriteRangeResult>.Failure("invalid_range", "Trace range must fit within 0x0000..0xFFFF.");
+            }
+
+            traceAddress = address;
+            traceLength = length;
+            traceHit = false;
+            uint instructionsRun = 0;
+            try
+            {
+                for (var i = 0; i < maxInstructions && !traceHit; i++)
+                {
+                    StepOnce();
+                    instructionsRun++;
+                }
+            }
+            finally
+            {
+                traceAddress = -1;
+                traceLength = 0;
+            }
+
+            var registers = ReadRegisters();
+            if (!registers.IsSuccess)
+            {
+                return DebugResult<TraceUntilWriteRangeResult>.Failure(registers.Error!.Code, registers.Error.Message);
+            }
+
+            var ppu = ReadPpuState();
+            if (!ppu.IsSuccess)
+            {
+                return DebugResult<TraceUntilWriteRangeResult>.Failure(ppu.Error!.Code, ppu.Error.Message);
+            }
+
+            var disassemblyAddress = traceHit ? traceHitPc : ParseWord(registers.Value.Pc);
+            var disassembly = Disassemble(disassemblyAddress, 4);
+            if (!disassembly.IsSuccess)
+            {
+                return DebugResult<TraceUntilWriteRangeResult>.Failure(disassembly.Error!.Code, disassembly.Error.Message);
+            }
+
+            return DebugResult<TraceUntilWriteRangeResult>.Success(new TraceUntilWriteRangeResult(
+                true,
+                traceHit ? "write" : "maxInstructions",
+                Hex.FormatWord(address),
+                length,
+                traceHit ? Hex.FormatWord(traceHitAddress) : null,
+                traceHit ? Hex.FormatWord(traceHitPc) : null,
+                traceHit ? Hex.FormatByte(traceHitValue) : null,
+                instructionsRun,
+                registers.Value,
+                ppu.Value,
+                disassembly.Value,
+                GetTimeline()));
         }
 
         public DebugResult<TilemapDumpResult> DumpTilemap(ushort address)
@@ -689,6 +914,185 @@ namespace GameBoy.Debug.Emulator
             return DebugResult<ReadSymbolResult>.Success(new ReadSymbolResult(name, Hex.FormatWord(resolved.Value.Address), bytes, Hex.FormatBytes(bytes)));
         }
 
+        public DebugResult<ScreenRegionResult> ReadScreenRegion(int x, int y, int width, int height, string format)
+        {
+            if (!romLoaded)
+            {
+                return NoRom<ScreenRegionResult>();
+            }
+
+            if (x < 0 || y < 0 || width < 1 || height < 1 || x + width > ScreenWidth || y + height > ScreenHeight)
+            {
+                return DebugResult<ScreenRegionResult>.Failure("invalid_screen_region", "Screen region must fit within 160x144.");
+            }
+
+            if (format.Equals("dmg_shades", StringComparison.OrdinalIgnoreCase))
+            {
+                return DebugResult<ScreenRegionResult>.Success(BuildDmgShadeRegion(x, y, width, height));
+            }
+
+            return DebugResult<ScreenRegionResult>.Failure("invalid_screen_region_format", "format must be dmg_shades.");
+        }
+
+        public DebugResult<InputTimelineResult> RunInputTimeline(IReadOnlyList<InputTimelineStep> steps)
+        {
+            if (!romLoaded)
+            {
+                return NoRom<InputTimelineResult>();
+            }
+
+            var results = new List<InputTimelineStepResult>(steps.Count);
+            var totalFramesRun = 0;
+            var completed = false;
+            try
+            {
+                for (var index = 0; index < steps.Count; index++)
+                {
+                    var step = steps[index];
+                    var buttons = ParseButtonNames(step.Buttons);
+                    if (!buttons.IsSuccess)
+                    {
+                        return DebugResult<InputTimelineResult>.Failure(buttons.Error!.Code, buttons.Error.Message);
+                    }
+
+                    var joypad = SetJoypad(buttons.Value);
+                    if (!joypad.IsSuccess)
+                    {
+                        return DebugResult<InputTimelineResult>.Failure(joypad.Error!.Code, joypad.Error.Message);
+                    }
+
+                    var run = RunFrame(step.Frames);
+                    if (!run.IsSuccess)
+                    {
+                        return DebugResult<InputTimelineResult>.Failure(run.Error!.Code, run.Error.Message);
+                    }
+
+                    totalFramesRun += run.Value.FramesRun;
+
+                    CpuRegisters? registers = null;
+                    if (step.ReadRegisters)
+                    {
+                        var readRegisters = ReadRegisters();
+                        if (!readRegisters.IsSuccess)
+                        {
+                            return DebugResult<InputTimelineResult>.Failure(readRegisters.Error!.Code, readRegisters.Error.Message);
+                        }
+
+                        registers = readRegisters.Value;
+                    }
+
+                    PpuStateResult? ppuState = null;
+                    if (step.ReadPpuState)
+                    {
+                        var readPpu = ReadPpuState();
+                        if (!readPpu.IsSuccess)
+                        {
+                            return DebugResult<InputTimelineResult>.Failure(readPpu.Error!.Code, readPpu.Error.Message);
+                        }
+
+                        ppuState = readPpu.Value;
+                    }
+
+                    OamDumpResult? oam = null;
+                    if (step.DumpOam)
+                    {
+                        var readOam = ReadOam();
+                        if (!readOam.IsSuccess)
+                        {
+                            return DebugResult<InputTimelineResult>.Failure(readOam.Error!.Code, readOam.Error.Message);
+                        }
+
+                        oam = readOam.Value;
+                    }
+
+                    ScreenCaptureResult? capture = null;
+                    if (step.Capture)
+                    {
+                        var screen = CaptureScreen();
+                        if (!screen.IsSuccess)
+                        {
+                            return DebugResult<InputTimelineResult>.Failure(screen.Error!.Code, screen.Error.Message);
+                        }
+
+                        capture = screen.Value;
+                    }
+
+                    TilemapDumpResult? tilemap = null;
+                    if (step.DumpTilemap)
+                    {
+                        var address = (ushort)0x9800;
+                        if (!string.IsNullOrWhiteSpace(step.TilemapAddress))
+                        {
+                            var parsed = GameBoyAddress.Parse(step.TilemapAddress);
+                            if (!parsed.IsSuccess)
+                            {
+                                return DebugResult<InputTimelineResult>.Failure(parsed.Error!.Code, parsed.Error.Message);
+                            }
+
+                            address = parsed.Value.Address;
+                        }
+
+                        var dump = DumpTilemap(address);
+                        if (!dump.IsSuccess)
+                        {
+                            return DebugResult<InputTimelineResult>.Failure(dump.Error!.Code, dump.Error.Message);
+                        }
+
+                        tilemap = dump.Value;
+                    }
+
+                    MemoryReadResult? memory = null;
+                    if (!string.IsNullOrWhiteSpace(step.MemoryAddress))
+                    {
+                        var parsed = GameBoyAddress.Parse(step.MemoryAddress);
+                        if (!parsed.IsSuccess)
+                        {
+                            return DebugResult<InputTimelineResult>.Failure(parsed.Error!.Code, parsed.Error.Message);
+                        }
+
+                        var memoryLength = step.MemoryLength ?? 1;
+                        var readMemory = ReadMemory(parsed.Value.Address, memoryLength);
+                        if (!readMemory.IsSuccess)
+                        {
+                            return DebugResult<InputTimelineResult>.Failure(readMemory.Error!.Code, readMemory.Error.Message);
+                        }
+
+                        memory = readMemory.Value;
+                    }
+
+                    results.Add(new InputTimelineStepResult(
+                        index,
+                        run.Value.FramesRun,
+                        totalFrames,
+                        buttons.Value.Select(ToButtonName).ToArray(),
+                        registers,
+                        ppuState,
+                        oam,
+                        capture,
+                        tilemap,
+                        memory,
+                        GetTimeline()));
+                }
+
+                completed = true;
+            }
+            finally
+            {
+                if (!completed)
+                {
+                    _ = SetJoypad([]);
+                }
+            }
+
+            var released = SetJoypad([]);
+            if (!released.IsSuccess)
+            {
+                return DebugResult<InputTimelineResult>.Failure(released.Error!.Code, released.Error.Message);
+            }
+
+            return DebugResult<InputTimelineResult>.Success(new InputTimelineResult(totalFramesRun, released.Value, results, GetTimeline()));
+        }
+
         public DebugResult<SaveStateResult> SaveState(string path)
         {
             if (!romLoaded)
@@ -721,6 +1125,10 @@ namespace GameBoy.Debug.Emulator
                         writer.Write(ReadByte((ushort)(start + i)));
                     }
                 }
+
+                writer.Write(totalFrames);
+                writer.Write(totalCycles);
+                writer.Write(totalInstructions);
 
                 return DebugResult<SaveStateResult>.Success(new SaveStateResult(true, path));
             }
@@ -786,6 +1194,19 @@ namespace GameBoy.Debug.Emulator
                 r.SP = sp;
                 r.PC = pc;
 
+                if (stream.Position + sizeof(ulong) * 3 <= stream.Length)
+                {
+                    totalFrames = reader.ReadUInt64();
+                    totalCycles = reader.ReadUInt64();
+                    totalInstructions = reader.ReadUInt64();
+                }
+                else
+                {
+                    totalFrames = 0;
+                    totalCycles = 0;
+                    totalInstructions = 0;
+                }
+
                 return DebugResult<LoadStateResult>.Success(new LoadStateResult(true, path));
             }
             catch (Exception ex)
@@ -807,7 +1228,9 @@ namespace GameBoy.Debug.Emulator
         }
 
         private int traceAddress = -1;
+        private int traceLength;
         private bool traceHit;
+        private ushort traceHitAddress;
         private ushort traceHitPc;
         private byte traceHitValue;
         private string romPath;
@@ -826,9 +1249,10 @@ namespace GameBoy.Debug.Emulator
                 ? new WriteRecord(pc, byteValue, existing.Count + 1)
                 : new WriteRecord(pc, byteValue, 1);
 
-            if (masked == traceAddress)
+            if (traceAddress >= 0 && masked >= traceAddress && masked < traceAddress + traceLength)
             {
                 traceHit = true;
+                traceHitAddress = (ushort)masked;
                 traceHitPc = pc;
                 traceHitValue = byteValue;
             }
@@ -905,6 +1329,7 @@ namespace GameBoy.Debug.Emulator
             finally
             {
                 trackReads = previousTrackReads;
+                totalInstructions++;
             }
         }
 
@@ -933,6 +1358,8 @@ namespace GameBoy.Debug.Emulator
 
         private void TickOnce()
         {
+            totalCycles++;
+            totalFrames = totalCycles / CyclesPerFrame;
             var mode = gameboy.Tick();
             if (mode.HasValue)
             {
@@ -946,6 +1373,8 @@ namespace GameBoy.Debug.Emulator
         }
 
         private byte ReadByte(ushort address) => (byte)(gameboy.Mmu.GetByte(address) & 0xFF);
+
+        private TimelineCounters GetTimeline() => new(totalFrames, totalCycles, totalInstructions);
 
         private byte[] ReadBytes(ushort address, int length)
         {
@@ -1004,7 +1433,7 @@ namespace GameBoy.Debug.Emulator
 
                 if (watchHit.HasValue)
                 {
-                    return Stop("watchpoint", registers.Value);
+                    return Stop("watchpoint", registers.Value, 1);
                 }
 
                 var breakpoint = IsBreakpointHit(ParseWord(registers.Value.Pc), registers.Value);
@@ -1015,10 +1444,10 @@ namespace GameBoy.Debug.Emulator
 
                 if (breakpoint.Value)
                 {
-                    return Stop("breakpoint", registers.Value);
+                    return Stop("breakpoint", registers.Value, 1);
                 }
 
-                return registers.Value.Halted ? Stop("halt", registers.Value) : Stop(reason, registers.Value);
+                return registers.Value.Halted ? Stop("halt", registers.Value, 1) : Stop(reason, registers.Value, 1);
             }
             finally
             {
@@ -1038,7 +1467,7 @@ namespace GameBoy.Debug.Emulator
                     {
                         var halted = ReadRegisters();
                         return halted.IsSuccess
-                            ? Stop("halt", halted.Value)
+                            ? Stop("halt", halted.Value, (ulong)i)
                             : DebugResult<ContinueResult>.Failure(halted.Error!.Code, halted.Error.Message);
                     }
 
@@ -1051,7 +1480,7 @@ namespace GameBoy.Debug.Emulator
 
                     if (watchHit.HasValue)
                     {
-                        return Stop("watchpoint", registers.Value);
+                        return Stop("watchpoint", registers.Value, (ulong)i + 1);
                     }
 
                     var breakpoint = IsBreakpointHit(ParseWord(registers.Value.Pc), registers.Value);
@@ -1062,23 +1491,23 @@ namespace GameBoy.Debug.Emulator
 
                     if (breakpoint.Value)
                     {
-                        return Stop("breakpoint", registers.Value);
+                        return Stop("breakpoint", registers.Value, (ulong)i + 1);
                     }
 
                     if (registers.Value.Halted)
                     {
-                        return Stop("halt", registers.Value);
+                        return Stop("halt", registers.Value, (ulong)i + 1);
                     }
 
                     if (completed(registers.Value))
                     {
-                        return Stop(completedReason, registers.Value);
+                        return Stop(completedReason, registers.Value, (ulong)i + 1);
                     }
                 }
 
                 var final = ReadRegisters();
                 return final.IsSuccess
-                    ? Stop("maxInstructions", final.Value)
+                    ? Stop("maxInstructions", final.Value, (ulong)maxInstructions)
                     : DebugResult<ContinueResult>.Failure(final.Error!.Code, final.Error.Message);
             }
             finally
@@ -1106,8 +1535,29 @@ namespace GameBoy.Debug.Emulator
             trackReads = false;
         }
 
-        private static DebugResult<ContinueResult> Stop(string reason, CpuRegisters registers) =>
-            DebugResult<ContinueResult>.Success(new ContinueResult(true, reason, registers.Pc, registers));
+        private DebugResult<ContinueResult> Stop(string reason, CpuRegisters registers, ulong instructionsRun = 0) =>
+            DebugResult<ContinueResult>.Success(new ContinueResult(true, reason, registers.Pc, registers, GetTimeline(), instructionsRun));
+
+        private DebugResult<RunUntilConditionResult> StopRunUntilCondition(
+            string reason,
+            CpuRegisters registers,
+            uint instructionsRun,
+            ulong startFrames)
+        {
+            var ppu = ReadPpuState();
+            return ppu.IsSuccess
+                ? DebugResult<RunUntilConditionResult>.Success(
+                    new RunUntilConditionResult(
+                        true,
+                        reason,
+                        registers.Pc,
+                        instructionsRun,
+                        totalFrames - startFrames,
+                        registers,
+                        ppu.Value,
+                        GetTimeline()))
+                : DebugResult<RunUntilConditionResult>.Failure(ppu.Error!.Code, ppu.Error.Message);
+        }
 
         private static bool IsCallOrRst(byte opcode, out int length)
         {
@@ -1140,6 +1590,35 @@ namespace GameBoy.Debug.Emulator
             return DebugResult<byte>.Success(mask);
         }
 
+        private static DebugResult<IReadOnlyList<JoypadButton>> ParseButtonNames(IReadOnlyList<string>? buttons)
+        {
+            if (buttons is null)
+            {
+                return DebugResult<IReadOnlyList<JoypadButton>>.Failure("invalid_buttons", "buttons is required.");
+            }
+
+            var selected = new HashSet<JoypadButton>();
+            foreach (var rawButton in buttons)
+            {
+                var button = rawButton?.Trim();
+                if (string.IsNullOrEmpty(button))
+                {
+                    return DebugResult<IReadOnlyList<JoypadButton>>.Failure("invalid_button", "Button names must not be empty.");
+                }
+
+                if (!ButtonNames.TryGetValue(button, out var parsed))
+                {
+                    return DebugResult<IReadOnlyList<JoypadButton>>.Failure(
+                        "invalid_button",
+                        $"Unknown button '{button}'. Valid buttons: {string.Join(", ", ButtonNames.Keys)}.");
+                }
+
+                selected.Add(parsed);
+            }
+
+            return DebugResult<IReadOnlyList<JoypadButton>>.Success(CanonicalButtons.Where(selected.Contains).ToArray());
+        }
+
         private static JoypadStateResult ToJoypadState(byte mask)
         {
             return new JoypadStateResult(
@@ -1168,6 +1647,72 @@ namespace GameBoy.Debug.Emulator
             JoypadButton.Start => "start",
             _ => throw new ArgumentOutOfRangeException(nameof(button), button, null),
         };
+
+        private ScreenRegionResult BuildDmgShadeRegion(int x, int y, int width, int height)
+        {
+            var shades = display.SnapshotDmgShades();
+            var values = new List<int>(Math.Min(width * height, MaxRawScreenRegionPixels));
+            var includeRaw = width * height <= MaxRawScreenRegionPixels;
+            var histogram = new Dictionary<string, int>(StringComparer.Ordinal)
+            {
+                ["0"] = 0,
+                ["1"] = 0,
+                ["2"] = 0,
+                ["3"] = 0,
+            };
+            var rowHashes = new List<string>(height);
+
+            for (var row = 0; row < height; row++)
+            {
+                var hash = 2166136261u;
+                for (var column = 0; column < width; column++)
+                {
+                    var shade = shades[(y + row) * ScreenWidth + x + column];
+                    if (includeRaw)
+                    {
+                        values.Add(shade);
+                    }
+
+                    histogram[shade.ToString()]++;
+                    hash ^= shade;
+                    hash *= 16777619u;
+                }
+
+                rowHashes.Add($"0x{hash:X8}");
+            }
+
+            var ppu = ReadPpuState();
+            var mapping = ppu.IsSuccess
+                ? BuildScreenMapping(x, y, ppu.Value)
+                : null;
+
+            return new ScreenRegionResult(
+                x,
+                y,
+                width,
+                height,
+                "dmg_shades",
+                width * height,
+                includeRaw ? values : null,
+                histogram,
+                rowHashes,
+                mapping);
+        }
+
+        private static ScreenToBgTileMapping BuildScreenMapping(int x, int y, PpuStateResult ppu)
+        {
+            var scx = ParseByte(ppu.Scx);
+            var scy = ParseByte(ppu.Scy);
+            var lcdc = ParseByte(ppu.Lcdc);
+            var tilemapAddress = (lcdc & 0x08) != 0 ? 0x9C00 : 0x9800;
+            return new ScreenToBgTileMapping(
+                ((x + scx) & 0xFF) / 8,
+                ((y + scy) & 0xFF) / 8,
+                Hex.FormatWord((ushort)tilemapAddress));
+        }
+
+        private static byte ParseByte(string value) =>
+            Convert.ToByte(value.Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase), 16);
 
         private static ushort ParseWord(string value) =>
             (ushort)Convert.ToInt32(value.Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase), 16);

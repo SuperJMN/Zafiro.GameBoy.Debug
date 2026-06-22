@@ -66,14 +66,51 @@ This example assumes a ROM at `/tmp/demo.gb` and optional symbols at `/tmp/demo.
 { "tool": "capture_screen", "arguments": {} }
 ```
 
-9. Trace a write and inspect tile data:
+9. Run a deterministic input timeline and capture a repro artifact:
+
+```json
+{
+  "tool": "run_input_timeline",
+  "arguments": {
+    "steps": [
+      { "frames": 60, "buttons": ["right"] },
+      { "frames": 4, "buttons": ["right", "a"], "capture": true },
+      { "frames": 40, "buttons": ["right"], "readPpuState": true }
+    ]
+  }
+}
+```
+
+```json
+{ "tool": "capture_screen", "arguments": { "path": "artifacts/demo-frame.png", "includeMetadata": true } }
+```
+
+10. Stop on a hardware condition and assert a screen region:
+
+```json
+{ "tool": "run_until_condition", "arguments": { "condition": "LY >= 0x90", "maxInstructions": 1000000, "maxFrames": 120 } }
+```
+
+```json
+{ "tool": "read_screen_region", "arguments": { "x": 0, "y": 0, "width": 160, "height": 32, "format": "dmg_shades" } }
+```
+
+11. Trace writes and inspect tile data:
 
 ```json
 { "tool": "trace_until_write", "arguments": { "address": "0xC000", "maxInstructions": 1000000 } }
 ```
 
 ```json
+{ "tool": "trace_until_write_range", "arguments": { "address": "0x9800", "length": 32, "maxInstructions": 1000000 } }
+```
+
+```json
 { "tool": "find_last_writer", "arguments": { "address": "0xC000" } }
+```
+
+```json
+{ "tool": "find_last_writers", "arguments": { "address": "0x9800", "length": 32 } }
 ```
 
 ```json
