@@ -83,6 +83,19 @@ For development against a local checkout you can still run it from source:
 }
 ```
 
+### Codex Tool Discovery Troubleshooting
+
+`GameBoy.Mcp` 0.0.13 exposes 38 MCP tools through the server's real `tools/list` output, including advanced debugging tools such as `read_memory`, `read_ppu_state`, `capture_screen`, `run_input_timeline`, `dump_oam`, `dump_tilemap`, and `trace_until_write`.
+
+Some MCP clients, including Codex, may initially show only the subset of tools that has been surfaced to the current model session. Do not treat that initial visible subset as the complete server capability list. If tools such as `capture_screen` or `run_input_timeline` appear to be missing:
+
+1. Verify that the active client entry runs the current package, for example `dnx GameBoy.Mcp --yes` or `gameboymcp`.
+2. In Codex, inspect the configured MCP server with `/mcp verbose` and confirm that it points at the expected command.
+3. Ask Codex to search for the exact advanced tool names, for example `gameboy_debug load_rom run_input_timeline capture_screen dump_oam read_screen_region`.
+4. When in doubt, use an MCP inspector or direct MCP client probe against the same command and check the actual `tools/list` response. For `GameBoy.Mcp` 0.0.13, that response should report 38 tools.
+
+If the direct `tools/list` response includes a tool but Codex has not surfaced it yet, the package/server is not stale. It is a deferred tool-discovery issue in the client session.
+
 ## Tools
 
 Implemented tools:
