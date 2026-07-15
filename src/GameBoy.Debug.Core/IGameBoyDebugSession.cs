@@ -64,7 +64,11 @@ public interface IGameBoyDebugSession
 
     DebugResult<TraceUntilWriteRangeResult> TraceUntilWriteRange(ushort address, int length, int maxInstructions);
 
+    DebugResult<VideoWriteTraceResult> TraceVideoWrites(VideoWriteTraceRequest request);
+
     DebugResult<TilemapDumpResult> DumpTilemap(ushort address);
+
+    DebugResult<TilemapSetDumpResult> DumpTilemaps(bool includeDetails);
 
     DebugResult<TilesetDumpResult> DumpTileset(ushort address, int tileCount);
 
@@ -75,6 +79,10 @@ public interface IGameBoyDebugSession
     DebugResult<ReadSymbolResult> ReadSymbol(string name, int? length);
 
     DebugResult<ScreenRegionResult> ReadScreenRegion(int x, int y, int width, int height, string format);
+
+    DebugResult<ScreenObservationResult> ObserveScreen(int frameCount);
+
+    DebugResult<ExecutionObservationResult> ObserveExecution(ExecutionObservationRequest request);
 
     DebugResult<InputTimelineResult> RunInputTimeline(IReadOnlyList<InputTimelineStep> steps);
 }

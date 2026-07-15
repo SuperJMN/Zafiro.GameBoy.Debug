@@ -472,8 +472,54 @@ public static class GameBoyDebugTools
             : new ToolError(range.Error!);
     }
 
+    [McpServerTool(Name = "trace_video_writes", ReadOnly = false, Destructive = false)]
+    [Description("Atomically runs bounded frames and continuously records selected VRAM, OAM, and LCD/PPU-register writes with exact pre/post PPU state.")]
+    public static object TraceVideoWrites(
+        IGameBoyDebugSession session,
+        int frameCount = 1,
+        int maxEvents = 1000,
+        string[]? kinds = null,
+        string[]? ppuRegisters = null,
+        string[]? buttons = null)
+    {
+        if (frameCount is < 1 or > MaxFrameCount)
+        {
+            return Error("invalid_frame_count", $"frameCount must be between 1 and {MaxFrameCount}.");
+        }
+
+        if (maxEvents is < 1 or > VideoWriteTracing.MaxEvents)
+        {
+            return Error("invalid_max_events", $"maxEvents must be between 1 and {VideoWriteTracing.MaxEvents}.");
+        }
+
+        var parsedKinds = ParseVideoWriteKinds(kinds);
+        if (!parsedKinds.IsSuccess)
+        {
+            return new ToolError(parsedKinds.Error!);
+        }
+
+        var parsedRegisters = ParsePpuRegisters(ppuRegisters);
+        if (!parsedRegisters.IsSuccess)
+        {
+            return new ToolError(parsedRegisters.Error!);
+        }
+
+        var parsedButtons = ParseButtons(buttons ?? []);
+        if (!parsedButtons.IsSuccess)
+        {
+            return new ToolError(parsedButtons.Error!);
+        }
+
+        return ToToolResult(session.TraceVideoWrites(new VideoWriteTraceRequest(
+            frameCount,
+            maxEvents,
+            parsedKinds.Value,
+            parsedRegisters.Value,
+            parsedButtons.Value)));
+    }
+
     [McpServerTool(Name = "read_screen_region", ReadOnly = true, Destructive = false)]
-    [Description("Reads deterministic shade data and summaries from a bounded screen region.")]
+    [Description("Reads deterministic DMG-shade or exact RGB24 data from a bounded screen region. Raw formats return every pixel, including a full frame.")]
     public static object ReadScreenRegion(IGameBoyDebugSession session, int x, int y, int width, int height, string format = "dmg_shades")
     {
         if (x < 0 || y < 0 || width < 1 || height < 1 || x + width > ScreenWidth || y + height > ScreenHeight)
@@ -481,12 +527,103 @@ public static class GameBoyDebugTools
             return Error("invalid_screen_region", "Screen region must fit within 160x144.");
         }
 
-        if (!format.Equals("dmg_shades", StringComparison.OrdinalIgnoreCase))
+        if (format is null || !new[] { "dmg_shades", "dmg_shades_raw", "rgb24", "rgb24_raw" }
+                .Contains(format, StringComparer.OrdinalIgnoreCase))
         {
-            return Error("invalid_screen_region_format", "format must be dmg_shades.");
+            return Error("invalid_screen_region_format", "format must be dmg_shades, dmg_shades_raw, rgb24, or rgb24_raw.");
         }
 
         return ToToolResult(session.ReadScreenRegion(x, y, width, height, format));
+    }
+
+    [McpServerTool(Name = "observe_screen", ReadOnly = false, Destructive = false)]
+    [Description("Runs frames while collecting exact RGB hashes and compact pixel/tile changes for detecting transient corruption and flicker.")]
+    public static object ObserveScreen(IGameBoyDebugSession session, int frameCount = 60)
+    {
+        if (frameCount is < 1 or > ScreenObserver.MaxFrames)
+        {
+            return Error("invalid_frame_count", $"frameCount must be between 1 and {ScreenObserver.MaxFrames}.");
+        }
+
+        return ToToolResult(session.ObserveScreen(frameCount));
+    }
+
+    [McpServerTool(Name = "observe_execution", ReadOnly = false, Destructive = false)]
+    [Description("Atomically correlates exact rendered frames, safe RAM/VRAM/OAM probes, optional PPU state, tilemap hashes, bounded video writes, input, breakpoints, and timeline counters.")]
+    public static object ObserveExecution(
+        IGameBoyDebugSession session,
+        int frameCount = 60,
+        string[]? buttons = null,
+        ExecutionMemoryProbeInput[]? memoryProbes = null,
+        bool includePpuState = false,
+        bool traceVideoWrites = true,
+        int maxVideoEvents = 1000,
+        string[]? videoKinds = null,
+        string[]? ppuRegisters = null)
+    {
+        if (frameCount is < 1 or > ExecutionObserver.MaxFrames)
+        {
+            return Error("invalid_frame_count", $"frameCount must be between 1 and {ExecutionObserver.MaxFrames}.");
+        }
+
+        var parsedButtons = ParseButtons(buttons ?? []);
+        if (!parsedButtons.IsSuccess)
+        {
+            return new ToolError(parsedButtons.Error!);
+        }
+
+        var probes = new List<MemoryProbe>();
+        foreach (var input in memoryProbes ?? [])
+        {
+            var parsed = ParseAddress(input.Address);
+            if (!parsed.IsSuccess)
+            {
+                return new ToolError(parsed.Error!);
+            }
+
+            var probe = new MemoryProbe(parsed.Value.Address, input.Length);
+            if (!ExecutionObserver.IsSafeProbe(probe) || input.Length > ExecutionObserver.MaxMemoryProbeLength)
+            {
+                return Error(
+                    "invalid_memory_probe",
+                    "Each probe must stay within one side-effect-free VRAM/RAM/OAM region and be at most 64 bytes.");
+            }
+
+            probes.Add(probe);
+        }
+
+        if (probes.Count > ExecutionObserver.MaxMemoryProbes ||
+            probes.Sum(probe => probe.Length) > ExecutionObserver.MaxMemoryBytesPerFrame)
+        {
+            return Error("invalid_memory_probes", "Memory probes exceed the published count or per-frame byte limit.");
+        }
+
+        var parsedKinds = ParseVideoWriteKinds(videoKinds);
+        if (!parsedKinds.IsSuccess)
+        {
+            return new ToolError(parsedKinds.Error!);
+        }
+
+        var parsedRegisters = ParsePpuRegisters(ppuRegisters);
+        if (!parsedRegisters.IsSuccess)
+        {
+            return new ToolError(parsedRegisters.Error!);
+        }
+
+        if (traceVideoWrites && maxVideoEvents is < 1 or > ExecutionObserver.MaxVideoEvents)
+        {
+            return Error("invalid_max_video_events", $"maxVideoEvents must be between 1 and {ExecutionObserver.MaxVideoEvents}.");
+        }
+
+        return ToToolResult(session.ObserveExecution(new ExecutionObservationRequest(
+            frameCount,
+            parsedButtons.Value,
+            probes,
+            includePpuState,
+            traceVideoWrites,
+            maxVideoEvents,
+            parsedKinds.Value,
+            parsedRegisters.Value)));
     }
 
     [McpServerTool(Name = "run_input_timeline", ReadOnly = false, Destructive = false)]
@@ -583,6 +720,11 @@ public static class GameBoyDebugTools
         return ToToolResult(session.DumpTilemap(parsed.Value.Address));
     }
 
+    [McpServerTool(Name = "dump_tilemaps", ReadOnly = true, Destructive = false)]
+    [Description("Atomically snapshots both 32x32 Game Boy tilemaps with hashes and optional CGB attribute-bank detail.")]
+    public static object DumpTilemaps(IGameBoyDebugSession session, bool includeDetails = false) =>
+        ToToolResult(session.DumpTilemaps(includeDetails));
+
     [McpServerTool(Name = "dump_tileset", ReadOnly = true, Destructive = false)]
     [Description("Dumps tile data from VRAM. Each tile is 16 bytes.")]
     public static object DumpTileset(IGameBoyDebugSession session, string address = "0x8000", int tileCount = 384)
@@ -622,6 +764,63 @@ public static class GameBoyDebugTools
             "access" => DebugResult<WatchpointMode>.Success(WatchpointMode.Access),
             _ => DebugResult<WatchpointMode>.Failure("invalid_watchpoint_mode", "Watchpoint mode must be read, write, or access."),
         };
+    }
+
+    private static DebugResult<IReadOnlySet<VideoWriteKind>> ParseVideoWriteKinds(IReadOnlyList<string>? kinds)
+    {
+        if (kinds is null || kinds.Count == 0)
+        {
+            return DebugResult<IReadOnlySet<VideoWriteKind>>.Success(VideoWriteTracing.DefaultKinds);
+        }
+
+        var parsed = new HashSet<VideoWriteKind>();
+        foreach (var raw in kinds)
+        {
+            switch (raw?.Trim().ToLowerInvariant())
+            {
+                case "vram":
+                    parsed.Add(VideoWriteKind.Vram);
+                    break;
+                case "oam":
+                    parsed.Add(VideoWriteKind.Oam);
+                    break;
+                case "ppu_register":
+                case "ppu_registers":
+                case "lcd_register":
+                case "lcd_registers":
+                    parsed.Add(VideoWriteKind.PpuRegister);
+                    break;
+                default:
+                    return DebugResult<IReadOnlySet<VideoWriteKind>>.Failure(
+                        "invalid_video_write_kind",
+                        "Video-write kinds must be vram, oam, or ppu_register.");
+            }
+        }
+
+        return DebugResult<IReadOnlySet<VideoWriteKind>>.Success(parsed);
+    }
+
+    private static DebugResult<IReadOnlySet<ushort>> ParsePpuRegisters(IReadOnlyList<string>? registers)
+    {
+        if (registers is null || registers.Count == 0)
+        {
+            return DebugResult<IReadOnlySet<ushort>>.Success(VideoWriteTracing.DefaultPpuRegisters);
+        }
+
+        var parsed = new HashSet<ushort>();
+        foreach (var register in registers)
+        {
+            if (!VideoWriteTracing.TryParsePpuRegister(register, out var address))
+            {
+                return DebugResult<IReadOnlySet<ushort>>.Failure(
+                    "invalid_ppu_register",
+                    $"'{register}' is not a supported Game Boy LCD/PPU register name or address.");
+            }
+
+            parsed.Add(address);
+        }
+
+        return DebugResult<IReadOnlySet<ushort>>.Success(parsed);
     }
 
     private static DebugResult<bool> ValidateAddressRange(ushort address, int length, int maxLength)
@@ -750,4 +949,11 @@ public static class GameBoyDebugTools
         JoypadButton.Select,
         JoypadButton.Start,
     ];
+}
+
+public sealed class ExecutionMemoryProbeInput
+{
+    public string Address { get; init; } = string.Empty;
+
+    public int Length { get; init; }
 }

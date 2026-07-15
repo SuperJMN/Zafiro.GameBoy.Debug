@@ -17,7 +17,7 @@ namespace GameBoy.Debug.Emulator
     /// Pure-managed <see cref="IGameBoyDebugSession"/> backed by the vendored CoreBoy emulator core.
     /// No native dependencies; runs anywhere .NET runs.
     /// </summary>
-    public sealed class ManagedGameBoyDebugSession : IGameBoyDebugSession, IDisposable
+    public sealed class ManagedGameBoyDebugSession : IGameBoyDebugSession, IRgbFrameSource, IDisposable
     {
         private const int ScreenWidth = FrameBufferDisplay.Width;
         private const int ScreenHeight = FrameBufferDisplay.Height;
@@ -88,6 +88,7 @@ namespace GameBoy.Debug.Emulator
         private ulong totalCycles;
         private ulong totalFrames;
         private ulong totalInstructions;
+        private bool instructionRetired;
 
         public DebugResult<LoadRomResult> LoadRom(string path)
         {
@@ -122,6 +123,12 @@ namespace GameBoy.Debug.Emulator
             display = new FrameBufferDisplay();
             controller = new HeadlessController();
             gameboy = new Gameboy(options, cartridge, display, controller, new NullSoundOutput(), new NullSerialEndpoint());
+            gameboy.Cpu.InstructionCompleted = () =>
+            {
+                totalInstructions++;
+                instructionRetired = true;
+            };
+            gameboy.Mmu.BeforeWriteObserver = OnBeforeMemoryWrite;
             gameboy.Mmu.WriteObserver = OnMemoryWrite;
             gameboy.Mmu.ReadObserver = null;
             lastMode = null;
@@ -196,6 +203,24 @@ namespace GameBoy.Debug.Emulator
             }
 
             watchHit = null;
+            var initialRegisters = ReadRegisters();
+            if (!initialRegisters.IsSuccess)
+            {
+                return DebugResult<RunFrameResult>.Failure(initialRegisters.Error!.Code, initialRegisters.Error.Message);
+            }
+
+            var initialBreakpoint = IsBreakpointHit(ParseWord(initialRegisters.Value.Pc), initialRegisters.Value);
+            if (!initialBreakpoint.IsSuccess)
+            {
+                return DebugResult<RunFrameResult>.Failure(initialBreakpoint.Error!.Code, initialBreakpoint.Error.Message);
+            }
+
+            if (initialBreakpoint.Value)
+            {
+                return DebugResult<RunFrameResult>.Success(
+                    new RunFrameResult(0, initialRegisters.Value, true, GetTimeline()));
+            }
+
             var framesRun = 0;
             AttachReadObserverIfNeeded();
             try
@@ -208,7 +233,7 @@ namespace GameBoy.Debug.Emulator
                         framesRun++;
                     }
 
-                    if (watchHit.HasValue)
+                    if (!completed || watchHit.HasValue)
                     {
                         break;
                     }
@@ -682,24 +707,23 @@ namespace GameBoy.Debug.Emulator
             var wx = ReadByte(0xFF4B);
             var vbk = ReadByte(0xFF4F);
 
-            return DebugResult<PpuStateResult>.Success(new PpuStateResult(
-                Hex.FormatByte(lcdc),
-                Hex.FormatByte(stat),
-                stat & 0x03,
-                Hex.FormatByte(ly),
-                Hex.FormatByte(lyc),
-                Hex.FormatByte(scy),
-                Hex.FormatByte(scx),
-                Hex.FormatByte(wy),
-                Hex.FormatByte(wx),
-                Hex.FormatByte(bgp),
-                Hex.FormatByte(obp0),
-                Hex.FormatByte(obp1),
-                Hex.FormatByte(vbk),
-                (lcdc & 0x80) != 0,
-                (lcdc & 0x02) != 0,
-                (lcdc & 0x20) != 0,
-                (lcdc & 0x01) != 0));
+            return DebugResult<PpuStateResult>.Success(PpuStateBuilder.Build(new PpuRegistersSnapshot(
+                lcdc,
+                stat,
+                ly,
+                lyc,
+                scy,
+                scx,
+                wy,
+                wx,
+                bgp,
+                obp0,
+                obp1,
+                vbk,
+                romModel == "CGB",
+                gameboy.GpuTicksInLine,
+                TimingAuthoritative: true,
+                Timeline: GetTimeline())));
         }
 
         public DebugResult<ScreenCaptureResult> CaptureScreen()
@@ -851,6 +875,91 @@ namespace GameBoy.Debug.Emulator
                 GetTimeline()));
         }
 
+        public DebugResult<VideoWriteTraceResult> TraceVideoWrites(VideoWriteTraceRequest request)
+        {
+            if (!romLoaded)
+            {
+                return NoRom<VideoWriteTraceResult>();
+            }
+
+            var validation = ValidateVideoTraceRequest(request);
+            if (!validation.IsSuccess)
+            {
+                return DebugResult<VideoWriteTraceResult>.Failure(validation.Error!.Code, validation.Error.Message);
+            }
+
+            var initial = CapturePpuStateWithoutWatchpoints();
+            if (!initial.IsSuccess)
+            {
+                return DebugResult<VideoWriteTraceResult>.Failure(initial.Error!.Code, initial.Error.Message);
+            }
+
+            var held = SetJoypad(request.Buttons);
+            if (!held.IsSuccess)
+            {
+                return DebugResult<VideoWriteTraceResult>.Failure(held.Error!.Code, held.Error.Message);
+            }
+
+            var trace = new ActiveVideoTrace(request, totalFrames);
+            var framesRun = 0;
+            var hitBreakpoint = false;
+            JoypadStateResult? released = null;
+            try
+            {
+                activeVideoTrace = trace;
+                for (var frame = 0; frame < request.FrameCount; frame++)
+                {
+                    var run = RunFrame(1);
+                    if (!run.IsSuccess)
+                    {
+                        return DebugResult<VideoWriteTraceResult>.Failure(run.Error!.Code, run.Error.Message);
+                    }
+
+                    framesRun += run.Value.FramesRun;
+                    hitBreakpoint = run.Value.HitBreakpoint;
+                    if (run.Value.FramesRun == 0 || hitBreakpoint)
+                    {
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                activeVideoTrace = null;
+                pendingVideoWrite = null;
+                var release = SetJoypad([]);
+                if (release.IsSuccess)
+                {
+                    released = release.Value;
+                }
+            }
+
+            if (released is null)
+            {
+                return DebugResult<VideoWriteTraceResult>.Failure("release_joypad_failed", "Could not release joypad input after video tracing.");
+            }
+
+            var final = CapturePpuStateWithoutWatchpoints();
+            if (!final.IsSuccess)
+            {
+                return DebugResult<VideoWriteTraceResult>.Failure(final.Error!.Code, final.Error.Message);
+            }
+
+            return DebugResult<VideoWriteTraceResult>.Success(new VideoWriteTraceResult(
+                request.FrameCount,
+                framesRun,
+                initial.Value,
+                final.Value,
+                trace.Events,
+                trace.Events.Count,
+                trace.EventsObserved,
+                trace.Truncated,
+                hitBreakpoint,
+                hitBreakpoint ? "breakpoint" : framesRun == request.FrameCount ? "frame_limit" : "execution_stop",
+                released,
+                GetTimeline()));
+        }
+
         public DebugResult<TilemapDumpResult> DumpTilemap(ushort address)
         {
             if (!romLoaded)
@@ -864,6 +973,29 @@ namespace GameBoy.Debug.Emulator
                 .ToArray();
 
             return DebugResult<TilemapDumpResult>.Success(new TilemapDumpResult(Hex.FormatWord(address), 32, 32, rows));
+        }
+
+        public DebugResult<TilemapSetDumpResult> DumpTilemaps(bool includeDetails)
+        {
+            if (!romLoaded)
+            {
+                return NoRom<TilemapSetDumpResult>();
+            }
+
+            var bank0 = new byte[0x2000];
+            var bank1 = new byte[0x2000];
+            if (!gameboy.TryCopyVideoRamBank(0, bank0))
+            {
+                return DebugResult<TilemapSetDumpResult>.Failure("tilemap_snapshot_failed", "Could not snapshot VRAM bank 0.");
+            }
+
+            var hasBank1 = gameboy.TryCopyVideoRamBank(1, bank1);
+            return DebugResult<TilemapSetDumpResult>.Success(TilemapReader.Build(
+                bank0,
+                hasBank1 ? bank1 : [],
+                romModel,
+                includeDetails,
+                GetTimeline()));
         }
 
         public DebugResult<TilesetDumpResult> DumpTileset(ushort address, int tileCount)
@@ -926,12 +1058,183 @@ namespace GameBoy.Debug.Emulator
                 return DebugResult<ScreenRegionResult>.Failure("invalid_screen_region", "Screen region must fit within 160x144.");
             }
 
-            if (format.Equals("dmg_shades", StringComparison.OrdinalIgnoreCase))
+            if (format.Equals("dmg_shades", StringComparison.OrdinalIgnoreCase) ||
+                format.Equals("dmg_shades_raw", StringComparison.OrdinalIgnoreCase))
             {
-                return DebugResult<ScreenRegionResult>.Success(BuildDmgShadeRegion(x, y, width, height));
+                return DebugResult<ScreenRegionResult>.Success(BuildDmgShadeRegion(
+                    x,
+                    y,
+                    width,
+                    height,
+                    forceRaw: format.EndsWith("_raw", StringComparison.OrdinalIgnoreCase)));
             }
 
-            return DebugResult<ScreenRegionResult>.Failure("invalid_screen_region_format", "format must be dmg_shades.");
+            if (format.Equals("rgb24", StringComparison.OrdinalIgnoreCase) ||
+                format.Equals("rgb24_raw", StringComparison.OrdinalIgnoreCase))
+            {
+                return DebugResult<ScreenRegionResult>.Success(BuildRgb24Region(
+                    x,
+                    y,
+                    width,
+                    height,
+                    forceRaw: format.EndsWith("_raw", StringComparison.OrdinalIgnoreCase)));
+            }
+
+            return DebugResult<ScreenRegionResult>.Failure(
+                "invalid_screen_region_format",
+                "format must be dmg_shades, dmg_shades_raw, rgb24, or rgb24_raw.");
+        }
+
+        public DebugResult<ScreenObservationResult> ObserveScreen(int frameCount) =>
+            ScreenObserver.Observe(this, frameCount);
+
+        public DebugResult<ExecutionObservationResult> ObserveExecution(ExecutionObservationRequest request)
+        {
+            if (!romLoaded)
+            {
+                return NoRom<ExecutionObservationResult>();
+            }
+
+            var validation = ValidateExecutionObservationRequest(request);
+            if (!validation.IsSuccess)
+            {
+                return DebugResult<ExecutionObservationResult>.Failure(validation.Error!.Code, validation.Error.Message);
+            }
+
+            var initialTilemaps = DumpTilemaps(includeDetails: false);
+            if (!initialTilemaps.IsSuccess)
+            {
+                return DebugResult<ExecutionObservationResult>.Failure(initialTilemaps.Error!.Code, initialTilemaps.Error.Message);
+            }
+
+            var previous = display.Snapshot();
+            var current = new uint[ScreenFrameAnalyzer.PixelCount];
+            var initialHash = ScreenFrameAnalyzer.Hash(previous);
+            var frames = new List<ExecutionFrameObservation>(request.FrameCount);
+            var videoRequest = new VideoWriteTraceRequest(
+                request.FrameCount,
+                request.MaxVideoEvents,
+                request.VideoKinds,
+                request.PpuRegisters,
+                request.Buttons);
+            var videoTrace = request.TraceVideoWrites ? new ActiveVideoTrace(videoRequest, totalFrames) : null;
+            var held = SetJoypad(request.Buttons);
+            if (!held.IsSuccess)
+            {
+                return DebugResult<ExecutionObservationResult>.Failure(held.Error!.Code, held.Error.Message);
+            }
+
+            var framesRun = 0;
+            var hitBreakpoint = false;
+            var stopReason = "frame_limit";
+            JoypadStateResult? released = null;
+            try
+            {
+                activeVideoTrace = videoTrace;
+                for (var frameOffset = 1; frameOffset <= request.FrameCount; frameOffset++)
+                {
+                    var run = RunFrame(1);
+                    if (!run.IsSuccess)
+                    {
+                        return DebugResult<ExecutionObservationResult>.Failure(run.Error!.Code, run.Error.Message);
+                    }
+
+                    framesRun += run.Value.FramesRun;
+                    hitBreakpoint = run.Value.HitBreakpoint;
+                    if (run.Value.FramesRun == 0)
+                    {
+                        stopReason = hitBreakpoint
+                            ? "breakpoint"
+                            : watchHit.HasValue ? "watchpoint" : "execution_stop";
+                        break;
+                    }
+
+                    display.Snapshot().CopyTo(current, 0);
+                    var screen = ScreenFrameAnalyzer.Compare(previous, current, frameOffset, run.Value.Timeline.Frames);
+                    var memory = request.MemoryProbes
+                        .Select(probe => new MemoryProbeObservation(
+                            Hex.FormatWord(probe.Address),
+                            probe.Length,
+                            Hex.FormatBytes(ReadBytes(probe.Address, probe.Length))))
+                        .ToArray();
+                    PpuStateResult? ppuState = null;
+                    if (request.IncludePpuState)
+                    {
+                        var ppu = CapturePpuStateWithoutWatchpoints();
+                        if (!ppu.IsSuccess)
+                        {
+                            return DebugResult<ExecutionObservationResult>.Failure(ppu.Error!.Code, ppu.Error.Message);
+                        }
+
+                        ppuState = ppu.Value;
+                    }
+
+                    frames.Add(new ExecutionFrameObservation(screen, memory, ppuState));
+                    (previous, current) = (current, previous);
+                    if (hitBreakpoint)
+                    {
+                        stopReason = "breakpoint";
+                    }
+                }
+            }
+            finally
+            {
+                activeVideoTrace = null;
+                pendingVideoWrite = null;
+                var release = SetJoypad([]);
+                if (release.IsSuccess)
+                {
+                    released = release.Value;
+                }
+            }
+
+            if (released is null)
+            {
+                return DebugResult<ExecutionObservationResult>.Failure("release_joypad_failed", "Could not release joypad input after execution observation.");
+            }
+
+            var finalTilemaps = DumpTilemaps(includeDetails: false);
+            if (!finalTilemaps.IsSuccess)
+            {
+                return DebugResult<ExecutionObservationResult>.Failure(finalTilemaps.Error!.Code, finalTilemaps.Error.Message);
+            }
+
+            var events = videoTrace?.Events ?? [];
+            return DebugResult<ExecutionObservationResult>.Success(new ExecutionObservationResult(
+                request.FrameCount,
+                framesRun,
+                request.Buttons.Select(ToButtonName).ToArray(),
+                initialHash,
+                frames,
+                events,
+                events.Count,
+                videoTrace?.EventsObserved ?? 0,
+                videoTrace?.Truncated ?? false,
+                initialTilemaps.Value,
+                finalTilemaps.Value,
+                hitBreakpoint,
+                stopReason,
+                released,
+                ExecutionObserver.AppliedLimits,
+                GetTimeline()));
+        }
+
+        public DebugResult<int> CopyRgbFrame(Memory<uint> destination)
+        {
+            if (!romLoaded)
+            {
+                return NoRom<int>();
+            }
+
+            if (destination.Length < ScreenFrameAnalyzer.PixelCount)
+            {
+                return DebugResult<int>.Failure(
+                    "invalid_screen_frame_buffer",
+                    $"destination must contain at least {ScreenFrameAnalyzer.PixelCount} pixels.");
+            }
+
+            display.Snapshot().CopyTo(destination);
+            return DebugResult<int>.Success(ScreenFrameAnalyzer.PixelCount);
         }
 
         public DebugResult<InputTimelineResult> RunInputTimeline(IReadOnlyList<InputTimelineStep> steps)
@@ -1234,6 +1537,47 @@ namespace GameBoy.Debug.Emulator
         private ushort traceHitPc;
         private byte traceHitValue;
         private string romPath;
+        private ActiveVideoTrace activeVideoTrace;
+        private PendingVideoWrite pendingVideoWrite;
+
+        private void OnBeforeMemoryWrite(int address, int value)
+        {
+            var trace = activeVideoTrace;
+            if (!trackWrites || trace is null)
+            {
+                return;
+            }
+
+            var masked = (ushort)(address & 0xFFFF);
+            if (!VideoWriteTracing.TryClassify(masked, out var kind) ||
+                !trace.Request.Kinds.Contains(kind) ||
+                (kind == VideoWriteKind.PpuRegister && !trace.Request.PpuRegisters.Contains(masked)))
+            {
+                return;
+            }
+
+            if (trace.Events.Count >= trace.Request.MaxEvents)
+            {
+                pendingVideoWrite = new PendingVideoWrite(masked, (byte)value, kind, null, null);
+                return;
+            }
+
+            var before = CapturePpuStateWithoutWatchpoints();
+            if (!before.IsSuccess)
+            {
+                return;
+            }
+
+            int? vramBank = kind == VideoWriteKind.Vram
+                ? romModel == "CGB" ? ParseByte(before.Value.Vbk) & 1 : 0
+                : null;
+            pendingVideoWrite = new PendingVideoWrite(
+                masked,
+                (byte)(value & 0xFF),
+                kind,
+                before.Value,
+                vramBank);
+        }
 
         private void OnMemoryWrite(int address, int value)
         {
@@ -1242,7 +1586,7 @@ namespace GameBoy.Debug.Emulator
                 return;
             }
 
-            var pc = (ushort)gameboy.Cpu.Registers.PC;
+            var pc = (ushort)gameboy.Cpu.InstructionAddress;
             var masked = address & 0xFFFF;
             var byteValue = (byte)(value & 0xFF);
             lastWriters[masked] = lastWriters.TryGetValue(masked, out var existing)
@@ -1261,6 +1605,115 @@ namespace GameBoy.Debug.Emulator
             {
                 watchHit = new WatchHit((ushort)masked, watchpoint.Mode, pc, byteValue);
             }
+
+            var trace = activeVideoTrace;
+            var pending = pendingVideoWrite;
+            pendingVideoWrite = null;
+            if (trace is null || pending is null || pending.Address != masked)
+            {
+                return;
+            }
+
+            trace.EventsObserved++;
+            if (trace.Events.Count >= trace.Request.MaxEvents || pending.Before is null)
+            {
+                trace.Truncated = true;
+                return;
+            }
+
+            var after = CapturePpuStateWithoutWatchpoints();
+            if (!after.IsSuccess)
+            {
+                return;
+            }
+
+            trace.Events.Add(new VideoWriteEvent(
+                (int)(totalFrames - trace.StartFrame),
+                totalFrames,
+                totalCycles,
+                totalInstructions,
+                Hex.FormatWord(pc),
+                Hex.FormatWord((ushort)masked),
+                pending.Kind,
+                VideoWriteTracing.RegisterName((ushort)masked),
+                Hex.FormatByte(byteValue),
+                pending.VramBank,
+                pending.Before,
+                after.Value));
+        }
+
+        private DebugResult<PpuStateResult> CapturePpuStateWithoutWatchpoints()
+        {
+            var previousTrackReads = trackReads;
+            trackReads = false;
+            try
+            {
+                return ReadPpuState();
+            }
+            finally
+            {
+                trackReads = previousTrackReads;
+            }
+        }
+
+        private static DebugResult<bool> ValidateVideoTraceRequest(VideoWriteTraceRequest request)
+        {
+            if (request.FrameCount is < 1 or > ScreenObserver.MaxFrames)
+            {
+                return DebugResult<bool>.Failure("invalid_frame_count", $"frameCount must be between 1 and {ScreenObserver.MaxFrames}.");
+            }
+
+            if (request.MaxEvents is < 1 or > VideoWriteTracing.MaxEvents)
+            {
+                return DebugResult<bool>.Failure("invalid_max_events", $"maxEvents must be between 1 and {VideoWriteTracing.MaxEvents}.");
+            }
+
+            if (request.Kinds.Count == 0)
+            {
+                return DebugResult<bool>.Failure("invalid_video_write_kinds", "At least one video-write kind is required.");
+            }
+
+            if (request.Kinds.Contains(VideoWriteKind.PpuRegister) &&
+                (request.PpuRegisters.Count == 0 || request.PpuRegisters.Any(address => VideoWriteTracing.RegisterName(address) is null)))
+            {
+                return DebugResult<bool>.Failure("invalid_ppu_registers", "PPU register filters must contain known Game Boy LCD/PPU register addresses.");
+            }
+
+            return DebugResult<bool>.Success(true);
+        }
+
+        private static DebugResult<bool> ValidateExecutionObservationRequest(ExecutionObservationRequest request)
+        {
+            if (request.FrameCount is < 1 or > ExecutionObserver.MaxFrames)
+            {
+                return DebugResult<bool>.Failure("invalid_frame_count", $"frameCount must be between 1 and {ExecutionObserver.MaxFrames}.");
+            }
+
+            if (request.MemoryProbes.Count > ExecutionObserver.MaxMemoryProbes ||
+                request.MemoryProbes.Any(probe => probe.Length is < 1 or > ExecutionObserver.MaxMemoryProbeLength || !ExecutionObserver.IsSafeProbe(probe)) ||
+                request.MemoryProbes.Sum(probe => probe.Length) > ExecutionObserver.MaxMemoryBytesPerFrame)
+            {
+                return DebugResult<bool>.Failure(
+                    "invalid_memory_probes",
+                    "Memory probes must stay inside one side-effect-free VRAM/RAM/OAM region and respect the published count and byte limits.");
+            }
+
+            if (!request.TraceVideoWrites)
+            {
+                return DebugResult<bool>.Success(true);
+            }
+
+            if (request.MaxVideoEvents is < 1 or > ExecutionObserver.MaxVideoEvents)
+            {
+                return DebugResult<bool>.Failure("invalid_max_video_events", $"maxVideoEvents must be between 1 and {ExecutionObserver.MaxVideoEvents}.");
+            }
+
+            return ValidateVideoTraceRequest(new VideoWriteTraceRequest(
+                request.FrameCount,
+                request.MaxVideoEvents,
+                request.VideoKinds,
+                request.PpuRegisters,
+                request.Buttons));
         }
 
         private void OnMemoryRead(int address)
@@ -1273,7 +1726,7 @@ namespace GameBoy.Debug.Emulator
             var masked = (ushort)(address & 0xFFFF);
             if (watchpoints.TryMatch(masked, isWrite: false, out var watchpoint))
             {
-                watchHit = new WatchHit(masked, watchpoint.Mode, (ushort)gameboy.Cpu.Registers.PC, null);
+                watchHit = new WatchHit(masked, watchpoint.Mode, (ushort)gameboy.Cpu.InstructionAddress, null);
             }
         }
 
@@ -1329,7 +1782,6 @@ namespace GameBoy.Debug.Emulator
             finally
             {
                 trackReads = previousTrackReads;
-                totalInstructions++;
             }
         }
 
@@ -1337,6 +1789,7 @@ namespace GameBoy.Debug.Emulator
         {
             var previousTrackReads = trackReads;
             trackReads = gameboy.Mmu.ReadObserver != null;
+            instructionRetired = false;
             try
             {
                 for (var cycle = 0; cycle < CyclesPerFrame; cycle++)
@@ -1345,6 +1798,20 @@ namespace GameBoy.Debug.Emulator
                     if (watchHit.HasValue)
                     {
                         return false;
+                    }
+
+                    if (instructionRetired)
+                    {
+                        instructionRetired = false;
+                        var registers = ReadRegisters();
+                        if (registers.IsSuccess)
+                        {
+                            var breakpoint = IsBreakpointHit(ParseWord(registers.Value.Pc), registers.Value);
+                            if (breakpoint.IsSuccess && breakpoint.Value)
+                            {
+                                return false;
+                            }
+                        }
                     }
                 }
 
@@ -1648,11 +2115,11 @@ namespace GameBoy.Debug.Emulator
             _ => throw new ArgumentOutOfRangeException(nameof(button), button, null),
         };
 
-        private ScreenRegionResult BuildDmgShadeRegion(int x, int y, int width, int height)
+        private ScreenRegionResult BuildDmgShadeRegion(int x, int y, int width, int height, bool forceRaw)
         {
             var shades = display.SnapshotDmgShades();
             var values = new List<int>(Math.Min(width * height, MaxRawScreenRegionPixels));
-            var includeRaw = width * height <= MaxRawScreenRegionPixels;
+            var includeRaw = forceRaw || width * height <= MaxRawScreenRegionPixels;
             var histogram = new Dictionary<string, int>(StringComparer.Ordinal)
             {
                 ["0"] = 0,
@@ -1691,9 +2158,52 @@ namespace GameBoy.Debug.Emulator
                 y,
                 width,
                 height,
-                "dmg_shades",
+                forceRaw ? "dmg_shades_raw" : "dmg_shades",
                 width * height,
                 includeRaw ? values : null,
+                histogram,
+                rowHashes,
+                mapping);
+        }
+
+        private ScreenRegionResult BuildRgb24Region(int x, int y, int width, int height, bool forceRaw)
+        {
+            var pixels = display.Snapshot();
+            var includeRaw = forceRaw || width * height <= MaxRawScreenRegionPixels;
+            var values = includeRaw ? new List<int>(width * height) : null;
+            var histogram = new Dictionary<string, int>(StringComparer.Ordinal);
+            var rowHashes = new List<string>(height);
+
+            for (var row = 0; row < height; row++)
+            {
+                var hash = 2166136261u;
+                for (var column = 0; column < width; column++)
+                {
+                    var rgb = (int)(pixels[(y + row) * ScreenWidth + x + column] & 0xFFFFFF);
+                    values?.Add(rgb);
+                    var key = $"0x{rgb:X6}";
+                    histogram[key] = histogram.TryGetValue(key, out var count) ? count + 1 : 1;
+                    hash ^= (byte)(rgb >> 16);
+                    hash *= 16777619u;
+                    hash ^= (byte)(rgb >> 8);
+                    hash *= 16777619u;
+                    hash ^= (byte)rgb;
+                    hash *= 16777619u;
+                }
+
+                rowHashes.Add($"0x{hash:X8}");
+            }
+
+            var ppu = ReadPpuState();
+            var mapping = ppu.IsSuccess ? BuildScreenMapping(x, y, ppu.Value) : null;
+            return new ScreenRegionResult(
+                x,
+                y,
+                width,
+                height,
+                forceRaw ? "rgb24_raw" : "rgb24",
+                width * height,
+                values,
                 histogram,
                 rowHashes,
                 mapping);
@@ -1753,6 +2263,47 @@ namespace GameBoy.Debug.Emulator
             public ushort Pc { get; }
 
             public byte? Value { get; }
+        }
+
+        private sealed class ActiveVideoTrace
+        {
+            public ActiveVideoTrace(VideoWriteTraceRequest request, ulong startFrame)
+            {
+                Request = request;
+                StartFrame = startFrame;
+            }
+
+            public VideoWriteTraceRequest Request { get; }
+
+            public ulong StartFrame { get; }
+
+            public List<VideoWriteEvent> Events { get; } = new();
+
+            public int EventsObserved { get; set; }
+
+            public bool Truncated { get; set; }
+        }
+
+        private sealed class PendingVideoWrite
+        {
+            public PendingVideoWrite(ushort address, byte value, VideoWriteKind kind, PpuStateResult before, int? vramBank)
+            {
+                Address = address;
+                Value = value;
+                Kind = kind;
+                Before = before;
+                VramBank = vramBank;
+            }
+
+            public ushort Address { get; }
+
+            public byte Value { get; }
+
+            public VideoWriteKind Kind { get; }
+
+            public PpuStateResult Before { get; }
+
+            public int? VramBank { get; }
         }
 
         private sealed class ConditionContext : IBreakpointConditionContext

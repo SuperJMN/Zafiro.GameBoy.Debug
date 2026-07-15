@@ -1,12 +1,29 @@
 using GameBoy.Debug.Core;
 using GameBoy.Debug.Mcp;
 using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+using System.Reflection;
 using System.Text.Json;
 
 namespace GameBoy.Debug.Tests;
 
 public sealed class McpToolValidationTests
 {
+    [Fact]
+    public void Tool_surface_includes_corruption_observation_workflows()
+    {
+        var tools = typeof(GameBoyDebugTools)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Select(method => method.GetCustomAttribute<McpServerToolAttribute>()?.Name)
+            .Where(name => name is not null)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("observe_screen", tools);
+        Assert.Contains("observe_execution", tools);
+        Assert.Contains("trace_video_writes", tools);
+        Assert.Contains("dump_tilemaps", tools);
+    }
+
     [Fact]
     public void Read_memory_rejects_non_positive_length_without_calling_session()
     {
@@ -382,6 +399,51 @@ public sealed class McpToolValidationTests
     }
 
     [Fact]
+    public void Read_screen_region_forwards_full_frame_rgb_raw_format()
+    {
+        var session = new FakeDebugSession();
+
+        var result = GameBoyDebugTools.ReadScreenRegion(session, 0, 0, 160, 144, "rgb24_raw");
+
+        Assert.True(session.ReadScreenRegionCalled);
+        Assert.Equal("rgb24_raw", session.LastScreenRegionFormat);
+    }
+
+    [Fact]
+    public void Observe_execution_rejects_io_memory_probes_before_calling_session()
+    {
+        var session = new FakeDebugSession();
+
+        var result = GameBoyDebugTools.ObserveExecution(
+            session,
+            memoryProbes: [new ExecutionMemoryProbeInput { Address = "0xFF40", Length = 1 }]);
+
+        var error = Assert.IsType<ToolError>(result);
+        Assert.Equal("invalid_memory_probe", error.Error.Code);
+        Assert.False(session.ObserveExecutionCalled);
+    }
+
+    [Fact]
+    public void Trace_video_writes_normalizes_kinds_registers_and_buttons()
+    {
+        var session = new FakeDebugSession();
+
+        var result = GameBoyDebugTools.TraceVideoWrites(
+            session,
+            frameCount: 2,
+            maxEvents: 10,
+            kinds: ["vram", "ppu_register"],
+            ppuRegisters: ["LCDC", "$FF43"],
+            buttons: ["RIGHT"]);
+
+        Assert.True(session.TraceVideoWritesCalled);
+        Assert.Equal(2, session.LastVideoWriteTraceRequest!.FrameCount);
+        Assert.Equal([VideoWriteKind.Vram, VideoWriteKind.PpuRegister], session.LastVideoWriteTraceRequest.Kinds.Order());
+        Assert.Equal([(ushort)0xFF40, (ushort)0xFF43], session.LastVideoWriteTraceRequest.PpuRegisters.Order());
+        Assert.Equal([JoypadButton.Right], session.LastVideoWriteTraceRequest.Buttons);
+    }
+
+    [Fact]
     public void Run_input_timeline_passes_normalized_steps_to_session_atomically()
     {
         var session = new FakeDebugSession
@@ -525,6 +587,14 @@ public sealed class McpToolValidationTests
         public bool ReadScreenRegionCalled { get; private set; }
 
         public bool RunInputTimelineCalled { get; private set; }
+
+        public bool TraceVideoWritesCalled { get; private set; }
+
+        public bool ObserveExecutionCalled { get; private set; }
+
+        public string? LastScreenRegionFormat { get; private set; }
+
+        public VideoWriteTraceRequest? LastVideoWriteTraceRequest { get; private set; }
 
         public IReadOnlyList<InputTimelineStep> LastInputTimelineSteps { get; private set; } = [];
 
@@ -697,7 +767,16 @@ public sealed class McpToolValidationTests
             throw new NotSupportedException();
         }
 
+        public DebugResult<VideoWriteTraceResult> TraceVideoWrites(VideoWriteTraceRequest request)
+        {
+            TraceVideoWritesCalled = true;
+            LastVideoWriteTraceRequest = request;
+            return DebugResult<VideoWriteTraceResult>.Failure("not_configured", "The fake session was not configured.");
+        }
+
         public DebugResult<TilemapDumpResult> DumpTilemap(ushort address) => throw new NotSupportedException();
+
+        public DebugResult<TilemapSetDumpResult> DumpTilemaps(bool includeDetails) => throw new NotSupportedException();
 
         public DebugResult<TilesetDumpResult> DumpTileset(ushort address, int tileCount) => throw new NotSupportedException();
 
@@ -710,7 +789,16 @@ public sealed class McpToolValidationTests
         public DebugResult<ScreenRegionResult> ReadScreenRegion(int x, int y, int width, int height, string format)
         {
             ReadScreenRegionCalled = true;
-            throw new NotSupportedException();
+            LastScreenRegionFormat = format;
+            return DebugResult<ScreenRegionResult>.Failure("not_configured", "The fake session was not configured.");
+        }
+
+        public DebugResult<ScreenObservationResult> ObserveScreen(int frameCount) => throw new NotSupportedException();
+
+        public DebugResult<ExecutionObservationResult> ObserveExecution(ExecutionObservationRequest request)
+        {
+            ObserveExecutionCalled = true;
+            return DebugResult<ExecutionObservationResult>.Failure("not_configured", "The fake session was not configured.");
         }
 
         public DebugResult<InputTimelineResult> RunInputTimeline(IReadOnlyList<InputTimelineStep> steps)

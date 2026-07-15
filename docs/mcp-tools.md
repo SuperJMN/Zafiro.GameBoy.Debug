@@ -90,10 +90,74 @@ Input:
 Output:
 
 ```json
-{ "framesRun": 1, "registers": {}, "hitBreakpoint": false, "timeline": { "frames": 1, "cycles": 70224, "instructions": 0 } }
+{ "framesRun": 1, "registers": {}, "hitBreakpoint": false, "timeline": { "frames": 1, "cycles": 70224, "instructions": 17556 } }
 ```
 
-`run_frame` may stop before the requested frame count when a watchpoint is hit.
+`run_frame` may stop before the requested frame count when a breakpoint or watchpoint is hit, including a breakpoint at the initial PC.
+
+## observe_screen
+
+Atomically runs up to 600 complete frames. Every sample contains a SHA-256 identity of the exact rendered RGB24 frame, the number and bounds of changed pixels, and compact 8x8 tile-row masks. RGB identity is used rather than reduced DMG shades so CGB palette corruption cannot disappear during observation.
+
+```json
+{ "frameCount": 120 }
+```
+
+Save state before a suspicious sequence, use the returned `frameOffset` to find the transient frame, reload, then replay to the focal frame for exact region, tilemap, OAM, or video-write evidence. Observation stops without sampling an incomplete frame when execution reaches a breakpoint.
+
+## observe_execution
+
+Runs a bounded input sequence atomically and correlates, for every completed frame:
+
+- exact RGB framebuffer hash and compact visible changes;
+- up to 16 side-effect-free RAM/VRAM/OAM probes (64 bytes each, 256 bytes total per frame);
+- optional authoritative PPU state;
+- a bounded continuous video-write stream; and
+- initial/final hashes for both tilemaps, including CGB attribute bank 1.
+
+```json
+{
+  "frameCount": 120,
+  "buttons": ["right"],
+  "memoryProbes": [
+    { "address": "0xC000", "length": 16 },
+    { "address": "0x9800", "length": 32 }
+  ],
+  "includePpuState": true,
+  "traceVideoWrites": true,
+  "maxVideoEvents": 1000,
+  "videoKinds": ["vram", "oam", "ppu_register"],
+  "ppuRegisters": ["LCDC", "SCX", "SCY", "DMA", "WY", "WX", "VBK"]
+}
+```
+
+Probe ranges are deliberately restricted to VRAM `$8000-$9FFF`, cartridge RAM `$A000-$BFFF`, WRAM/echo `$C000-$FDFF`, OAM `$FE00-$FE9F`, and HRAM `$FF80-$FFFE`. I/O probes are rejected because reading I/O is not a generally side-effect-free observation.
+
+The event payload truncates at `maxVideoEvents` while execution continues. Compare `videoEventCount` with `videoEventsObserved` and inspect `videoTraceTruncated`. Held input is released on every exit path.
+
+## trace_video_writes
+
+Continuously records selected direct VRAM writes, OAM writes, and LCD/PPU-register writes for up to 600 frames. This is the Game Boy equivalent of NES PPU-register tracing: Game Boy writes tile/sprite data directly to memory instead of routing it through one `PPUDATA` register.
+
+```json
+{
+  "frameCount": 2,
+  "maxEvents": 1000,
+  "kinds": ["vram", "oam", "ppu_register"],
+  "ppuRegisters": ["LCDC", "SCX", "SCY", "DMA", "WY", "WX", "VBK"],
+  "buttons": ["right"]
+}
+```
+
+Each event includes bus order, value, writing PC, zero-based `frameOffset`, absolute frame/cycle/instruction counters, VRAM bank when relevant, and immediate PPU snapshots before and after the write. Supported register filters include DMG LCD registers plus CGB `VBK`, HDMA, and color-palette index/data registers. At most 10,000 events are returned; observation continues after the cap and reports `eventsObserved` plus `truncated`.
+
+## dump_tilemaps
+
+Snapshots both 32x32 maps at `$9800` and `$9C00` without changing `VBK`. Compact mode returns SHA-256 identities; `includeDetails: true` also returns all tile rows and, for CGB ROMs, the corresponding attribute rows from VRAM bank 1.
+
+```json
+{ "includeDetails": false }
+```
 
 ## step_over
 
@@ -551,13 +615,30 @@ Output:
   "bgp": "0xFC",
   "obp0": "0xFF",
   "obp1": "0xFF",
-  "vbk": "0x00",
+  "vbk": "0xFF",
   "lcdEnabled": true,
   "spritesEnabled": true,
   "windowEnabled": false,
-  "backgroundEnabled": true
+  "backgroundEnabled": true,
+  "scanline": 144,
+  "dot": 12,
+  "timingAuthoritative": true,
+  "vBlank": true,
+  "renderingActive": false,
+  "control": {
+    "backgroundWindowEnabled": true,
+    "backgroundWindowPriorityEnabled": true,
+    "backgroundTilemapAddress": "0x9800",
+    "tileDataAddress": "0x8000",
+    "windowTilemapAddress": "0x9800",
+    "spriteHeight": 8
+  },
+  "status": { "mode": 1, "modeName": "vblank", "lycEqualsLy": false },
+  "timeline": { "frames": 1, "cycles": 70224, "instructions": 17556 }
 }
 ```
+
+The raw LCD registers are accompanied by decoded LCDC/STAT fields, rendering state, selected CGB VRAM bank, and cumulative execution counters. `timingAuthoritative` says whether `dot` comes from the backend's live PPU clock. The managed backend reports an authoritative dot; the legacy SameBoy adapter reports `dot: null` and `timingAuthoritative: false` instead of fabricating sub-frame timing. On CGB, LCDC bit 0 is decoded as `backgroundWindowPriorityEnabled`; background/window rendering remains enabled as required by CGB semantics.
 
 ## capture_screen
 
@@ -720,7 +801,7 @@ Output:
 }
 ```
 
-Small regions include raw shade values in `values`; larger regions return deterministic histogram and row hash summaries for automated visual assertions. Bounds must fit within the 160x144 screen.
+Formats are `dmg_shades`, `dmg_shades_raw`, `rgb24`, and `rgb24_raw`. Summary formats include raw `values` automatically up to 1,024 pixels, then return a histogram plus row hashes. Raw formats explicitly return every value, including a complete 160x144 frame. RGB values are integers from `0x000000` through `0xFFFFFF`. Bounds must fit within the screen.
 
 ## dump_tilemap
 
