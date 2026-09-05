@@ -1,3 +1,4 @@
+using System;
 using System.Threading;
 using CoreBoy.controller;
 using CoreBoy.cpu;
@@ -20,6 +21,11 @@ namespace CoreBoy
         public SpeedMode SpeedMode { get; }
 
         public bool Pause { get; set; }
+
+        public int GpuTicksInLine => _gpu.GetTicksInLine();
+
+        public bool TryCopyVideoRamBank(int bank, Span<byte> destination) =>
+            _gpu.TryCopyVideoRamBank(bank, destination);
 
         private readonly Gpu _gpu;
         private readonly Timer _timer;

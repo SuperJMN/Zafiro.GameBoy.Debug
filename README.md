@@ -1,6 +1,6 @@
 # GameBoy.Mcp
 
-`GameBoy.Mcp` is a cross-platform .NET MCP server for inspecting and controlling a Game Boy or Game Boy Color ROM. It is distributed as a .NET tool (command: `gameboymcp`).
+`GameBoy.Mcp` is a cross-platform .NET MCP server for inspecting and controlling a Game Boy or Game Boy Color ROM. It includes bounded workflows for correlating transient screen corruption with RAM, tilemap, PPU, VRAM, OAM, and LCD-register state. It is distributed as a .NET tool (command: `gameboymcp`).
 
 The emulator core is **pure managed C#** (a trimmed, vendored copy of the MIT-licensed [CoreBoy](https://github.com/davidwhitney/CoreBoy), itself a port of [coffee-gb](https://github.com/trekawek/coffee-gb)). There are **no native dependencies**, so a single package runs anywhere .NET 10 runs — Windows, macOS and Linux, on x64 and arm64.
 
@@ -85,14 +85,14 @@ For development against a local checkout you can still run it from source:
 
 ### Codex Tool Discovery Troubleshooting
 
-`GameBoy.Mcp` 0.0.13 exposes 38 MCP tools through the server's real `tools/list` output, including advanced debugging tools such as `read_memory`, `read_ppu_state`, `capture_screen`, `run_input_timeline`, `dump_oam`, `dump_tilemap`, and `trace_until_write`.
+The current source exposes 42 MCP tools through the server's real `tools/list` output, including advanced debugging tools such as `observe_execution`, `trace_video_writes`, `observe_screen`, `dump_tilemaps`, `run_input_timeline`, and `trace_until_write`.
 
 Some MCP clients, including Codex, may initially show only the subset of tools that has been surfaced to the current model session. Do not treat that initial visible subset as the complete server capability list. If tools such as `capture_screen` or `run_input_timeline` appear to be missing:
 
 1. Verify that the active client entry runs the current package, for example `dnx GameBoy.Mcp --yes` or `gameboymcp`.
 2. In Codex, inspect the configured MCP server with `/mcp verbose` and confirm that it points at the expected command.
 3. Ask Codex to search for the exact advanced tool names, for example `gameboy_debug load_rom run_input_timeline capture_screen dump_oam read_screen_region`.
-4. When in doubt, use an MCP inspector or direct MCP client probe against the same command and check the actual `tools/list` response. For `GameBoy.Mcp` 0.0.13, that response should report 38 tools.
+4. When in doubt, use an MCP inspector or direct MCP client probe against the same command and check the actual `tools/list` response. A local build of the current source should report 42 tools.
 
 If the direct `tools/list` response includes a tool but Codex has not surfaced it yet, the package/server is not stale. It is a deferred tool-discovery issue in the client session.
 
@@ -136,6 +136,10 @@ Implemented tools:
 - `find_last_writers`
 - `trace_until_write`
 - `trace_until_write_range`
+- `trace_video_writes`
+- `observe_screen`
+- `observe_execution`
+- `dump_tilemaps`
 - `dump_tilemap`
 - `dump_tileset`
 
@@ -147,6 +151,7 @@ See [docs/mcp-tools.md](docs/mcp-tools.md) for schemas and examples.
 - Conditional breakpoints and `run_until_condition` are evaluated by the C# session loop and support register, PPU/IO alias, and memory comparisons such as `A == 0x10`, `LY >= 0x90`, `SCX == 4`, `HL >= 0xC000`, and `[HL] < 4`.
 - `.sym` parsing is intentionally simple: `BANK:ADDR Name` and `ADDR Name` lines with `;` or `#` comments.
 - `capture_screen` returns inline PNG image content unless a safe relative `.png` artifact path is provided.
+- Exact continuous video-write correlation and atomic CGB tilemap-bank snapshots require the managed CoreBoy backend used by the MCP host. The legacy SameBoy project supports `observe_screen` only when no managed breakpoints are set, because its native frame API cannot stop within a frame, and reports explicit `not_supported` results for managed-only workflows.
 - Savestates capture CPU registers and all CPU-visible RAM/IO; MBC bank selection and sub-frame PPU/APU timing are not captured, so save/restore is intended at frame boundaries.
 
 ## Emulator Core

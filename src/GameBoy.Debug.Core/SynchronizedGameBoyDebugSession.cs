@@ -164,9 +164,19 @@ public sealed class SynchronizedGameBoyDebugSession(IGameBoyDebugSession inner) 
         lock (gate) { return inner.TraceUntilWriteRange(address, length, maxInstructions); }
     }
 
+    public DebugResult<VideoWriteTraceResult> TraceVideoWrites(VideoWriteTraceRequest request)
+    {
+        lock (gate) { return inner.TraceVideoWrites(request); }
+    }
+
     public DebugResult<TilemapDumpResult> DumpTilemap(ushort address)
     {
         lock (gate) { return inner.DumpTilemap(address); }
+    }
+
+    public DebugResult<TilemapSetDumpResult> DumpTilemaps(bool includeDetails)
+    {
+        lock (gate) { return inner.DumpTilemaps(includeDetails); }
     }
 
     public DebugResult<TilesetDumpResult> DumpTileset(ushort address, int tileCount)
@@ -192,6 +202,16 @@ public sealed class SynchronizedGameBoyDebugSession(IGameBoyDebugSession inner) 
     public DebugResult<ScreenRegionResult> ReadScreenRegion(int x, int y, int width, int height, string format)
     {
         lock (gate) { return inner.ReadScreenRegion(x, y, width, height, format); }
+    }
+
+    public DebugResult<ScreenObservationResult> ObserveScreen(int frameCount)
+    {
+        lock (gate) { return inner.ObserveScreen(frameCount); }
+    }
+
+    public DebugResult<ExecutionObservationResult> ObserveExecution(ExecutionObservationRequest request)
+    {
+        lock (gate) { return inner.ObserveExecution(request); }
     }
 
     public DebugResult<InputTimelineResult> RunInputTimeline(IReadOnlyList<InputTimelineStep> steps)

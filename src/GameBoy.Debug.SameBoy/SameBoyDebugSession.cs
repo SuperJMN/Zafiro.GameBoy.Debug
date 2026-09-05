@@ -5,7 +5,7 @@ using GameBoy.Debug.Symbols;
 
 namespace GameBoy.Debug.SameBoy;
 
-public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
+public sealed class SameBoyDebugSession : IGameBoyDebugSession, IRgbFrameSource, IDisposable
 {
     private const int ScreenWidth = 160;
     private const int ScreenHeight = 144;
@@ -545,24 +545,23 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
             return DebugResult<PpuStateResult>.Failure(failed.Error.Code, failed.Error.Message);
         }
 
-        return DebugResult<PpuStateResult>.Success(new PpuStateResult(
-            Hex.FormatByte(lcdc.Value),
-            Hex.FormatByte(stat.Value),
-            stat.Value & 0x03,
-            Hex.FormatByte(ly.Value),
-            Hex.FormatByte(lyc.Value),
-            Hex.FormatByte(scy.Value),
-            Hex.FormatByte(scx.Value),
-            Hex.FormatByte(wy.Value),
-            Hex.FormatByte(wx.Value),
-            Hex.FormatByte(bgp.Value),
-            Hex.FormatByte(obp0.Value),
-            Hex.FormatByte(obp1.Value),
-            Hex.FormatByte(vbk.Value),
-            (lcdc.Value & 0x80) != 0,
-            (lcdc.Value & 0x02) != 0,
-            (lcdc.Value & 0x20) != 0,
-            (lcdc.Value & 0x01) != 0));
+        return DebugResult<PpuStateResult>.Success(PpuStateBuilder.Build(new PpuRegistersSnapshot(
+            lcdc.Value,
+            stat.Value,
+            ly.Value,
+            lyc.Value,
+            scy.Value,
+            scx.Value,
+            wy.Value,
+            wx.Value,
+            bgp.Value,
+            obp0.Value,
+            obp1.Value,
+            vbk.Value,
+            romModel == "CGB",
+            Dot: null,
+            TimingAuthoritative: false,
+            Timeline: GetTimeline())));
     }
 
     public DebugResult<ScreenCaptureResult> CaptureScreen()
@@ -689,6 +688,11 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
         return DebugResult<TraceUntilWriteRangeResult>.Failure("range_trace_not_supported", "Range tracing is only supported by the managed backend.");
     }
 
+    public DebugResult<VideoWriteTraceResult> TraceVideoWrites(VideoWriteTraceRequest request) =>
+        DebugResult<VideoWriteTraceResult>.Failure(
+            "video_write_trace_not_supported",
+            "Continuous VRAM, OAM, and PPU-register tracing is only supported by the managed backend.");
+
     public DebugResult<TilemapDumpResult> DumpTilemap(ushort address)
     {
         var bytes = ReadBytes(address, 32 * 32);
@@ -703,6 +707,11 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
 
         return DebugResult<TilemapDumpResult>.Success(new TilemapDumpResult(Hex.FormatWord(address), 32, 32, rows));
     }
+
+    public DebugResult<TilemapSetDumpResult> DumpTilemaps(bool includeDetails) =>
+        DebugResult<TilemapSetDumpResult>.Failure(
+            "tilemap_snapshot_not_supported",
+            "Atomic multi-bank tilemap snapshots are only supported by the managed backend.");
 
     public DebugResult<TilesetDumpResult> DumpTileset(ushort address, int tileCount)
     {
@@ -752,6 +761,48 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IDisposable
     public DebugResult<ScreenRegionResult> ReadScreenRegion(int x, int y, int width, int height, string format)
     {
         return DebugResult<ScreenRegionResult>.Failure("screen_region_not_supported", "Screen region probes are only supported by the managed backend.");
+    }
+
+    public DebugResult<ScreenObservationResult> ObserveScreen(int frameCount)
+    {
+        if (breakpoints.HasAny)
+        {
+            return DebugResult<ScreenObservationResult>.Failure(
+                "screen_observation_breakpoints_not_supported",
+                "The SameBoy frame API cannot stop at managed breakpoints during screen observation. Clear breakpoints or use the managed backend.");
+        }
+
+        return ScreenObserver.Observe(this, frameCount);
+    }
+
+    public DebugResult<ExecutionObservationResult> ObserveExecution(ExecutionObservationRequest request) =>
+        DebugResult<ExecutionObservationResult>.Failure(
+            "execution_observation_not_supported",
+            "Correlated multi-bank execution observation is only supported by the managed backend.");
+
+    public DebugResult<int> CopyRgbFrame(Memory<uint> destination)
+    {
+        var native = EnsureHandle<int>();
+        if (!native.IsSuccess)
+        {
+            return native;
+        }
+
+        if (destination.Length < ScreenPixelCount)
+        {
+            return DebugResult<int>.Failure(
+                "invalid_screen_frame_buffer",
+                $"destination must contain at least {ScreenPixelCount} pixels.");
+        }
+
+        var pixels = new uint[ScreenPixelCount];
+        if (SameBoyNative.CaptureScreen(handle, pixels, (UIntPtr)pixels.Length) != 0)
+        {
+            return NativeFailure<int>("capture_screen_failed");
+        }
+
+        pixels.CopyTo(destination);
+        return DebugResult<int>.Success(ScreenPixelCount);
     }
 
     public DebugResult<InputTimelineResult> RunInputTimeline(IReadOnlyList<InputTimelineStep> steps)

@@ -14,12 +14,22 @@ namespace CoreBoy.memory
         // find_last_writer / trace_until_write debugging tools.
         public System.Action<int, int> WriteObserver { get; set; }
 
+        // Added for gameboy-debug-mcp: capture authoritative state immediately before
+        // selected video writes, paired with WriteObserver's post-write callback.
+        public System.Action<int, int> BeforeWriteObserver { get; set; }
+
         // Added for gameboy-debug-mcp: observe reads to support memory watchpoints.
         public System.Action<int> ReadObserver { get; set; }
 
         public void SetByte(int address, int value)
         {
-            GetSpace(address).SetByte(address, value);
+            SetByte(GetSpace(address), address, value);
+        }
+
+        internal void SetByte(IAddressSpace target, int address, int value)
+        {
+            BeforeWriteObserver?.Invoke(address, value);
+            target.SetByte(address, value);
             WriteObserver?.Invoke(address, value);
         }
 

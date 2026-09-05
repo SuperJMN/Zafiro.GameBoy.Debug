@@ -449,6 +449,415 @@ public sealed class ManagedGameBoyDebugSessionIntegrationTests
         }
     }
 
+    [Fact]
+    public void Observe_screen_returns_one_exact_rgb_sample_per_completed_frame()
+    {
+        var romPath = CreateTestFilePath("managed-observe-screen", ".gb");
+        CreateMinimalRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+
+            var observation = session.ObserveScreen(2);
+
+            Assert.True(observation.IsSuccess, observation.Error?.Message);
+            Assert.Equal(2, observation.Value.FramesRun);
+            Assert.Equal(2, observation.Value.Samples.Count);
+            Assert.All(observation.Value.Samples, sample =>
+                Assert.StartsWith("sha256:", sample.Hash, StringComparison.Ordinal));
+            Assert.Equal(observation.Value.Timeline.Frames, observation.Value.Samples[^1].TotalFrame);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Observe_screen_stops_before_running_when_the_initial_pc_has_a_breakpoint()
+    {
+        var romPath = CreateTestFilePath("managed-screen-breakpoint", ".gb");
+        CreateMinimalRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+            Assert.True(session.SetBreakpoint(0x0100, null).IsSuccess);
+
+            var observation = session.ObserveScreen(2);
+
+            Assert.True(observation.IsSuccess, observation.Error?.Message);
+            Assert.Equal(0, observation.Value.FramesRun);
+            Assert.Empty(observation.Value.Samples);
+            Assert.True(observation.Value.HitBreakpoint);
+            Assert.Equal(0UL, observation.Value.Timeline.Frames);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Read_screen_region_raw_formats_return_the_complete_exact_frame()
+    {
+        var romPath = CreateTestFilePath("managed-screen-raw", ".gb");
+        CreateMinimalRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+            Assert.True(session.RunFrame(1).IsSuccess);
+
+            var shades = session.ReadScreenRegion(0, 0, 160, 144, "dmg_shades_raw");
+            var rgb = session.ReadScreenRegion(0, 0, 160, 144, "rgb24_raw");
+
+            Assert.True(shades.IsSuccess, shades.Error?.Message);
+            Assert.Equal(160 * 144, shades.Value.Values?.Count);
+            Assert.Equal("dmg_shades_raw", shades.Value.Format);
+            Assert.True(rgb.IsSuccess, rgb.Error?.Message);
+            Assert.Equal(160 * 144, rgb.Value.Values?.Count);
+            Assert.Equal("rgb24_raw", rgb.Value.Format);
+            Assert.All(rgb.Value.Values!, value => Assert.InRange(value, 0, 0xFFFFFF));
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Ppu_state_reports_selected_cgb_vram_bank_and_authoritative_timing()
+    {
+        var romPath = CreateTestFilePath("managed-ppu-state", ".gbc");
+        CreateMinimalRom(romPath, cgb: true);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+            Assert.True(session.WriteMemory(0xFF4F, [0x01]).IsSuccess);
+            Assert.True(session.WriteMemory(0xFF40, [0x90]).IsSuccess);
+            Assert.True(session.StepInstruction(1).IsSuccess);
+
+            var ppu = session.ReadPpuState();
+
+            Assert.True(ppu.IsSuccess, ppu.Error?.Message);
+            Assert.Equal("0xFF", ppu.Value.Vbk);
+            Assert.True(ppu.Value.Dot.HasValue);
+            Assert.InRange(ppu.Value.Dot.Value, 0, 455);
+            Assert.Equal(Convert.ToByte(ppu.Value.Ly[2..], 16), ppu.Value.Scanline);
+            Assert.Equal(ppu.Value.Mode == 1, ppu.Value.VBlank);
+            Assert.Equal(ppu.Value.Timeline, session.GetState().Value.Timeline);
+            Assert.Equal("0x9800", ppu.Value.Control.BackgroundTilemapAddress);
+            Assert.True(ppu.Value.Control.BackgroundWindowEnabled);
+            Assert.False(ppu.Value.Control.BackgroundWindowPriorityEnabled);
+            Assert.Equal(ppu.Value.Mode, ppu.Value.Status.Mode);
+            Assert.True(ppu.Value.TimingAuthoritative);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Dump_tilemaps_snapshots_both_maps_and_cgb_attribute_bank_without_changing_vbk()
+    {
+        var romPath = CreateTestFilePath("managed-tilemaps", ".gbc");
+        CreateMinimalRom(romPath, cgb: true);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+            Assert.True(session.WriteMemory(0xFF4F, [0x00]).IsSuccess);
+            Assert.True(session.WriteMemory(0x9800, [0x11]).IsSuccess);
+            Assert.True(session.WriteMemory(0x9C00, [0x22]).IsSuccess);
+            Assert.True(session.WriteMemory(0xFF4F, [0x01]).IsSuccess);
+            Assert.True(session.WriteMemory(0x9800, [0xA1]).IsSuccess);
+            Assert.True(session.WriteMemory(0x9C00, [0xA2]).IsSuccess);
+
+            var dump = session.DumpTilemaps(includeDetails: true);
+
+            Assert.True(dump.IsSuccess, dump.Error?.Message);
+            Assert.Equal("CGB", dump.Value.Model);
+            Assert.True(dump.Value.DetailsIncluded);
+            Assert.Collection(
+                dump.Value.Tilemaps,
+                map =>
+                {
+                    Assert.Equal("0x9800", map.Address);
+                    Assert.StartsWith("11 ", map.TileRows![0], StringComparison.Ordinal);
+                    Assert.StartsWith("A1 ", map.AttributeRows![0], StringComparison.Ordinal);
+                },
+                map =>
+                {
+                    Assert.Equal("0x9C00", map.Address);
+                    Assert.StartsWith("22 ", map.TileRows![0], StringComparison.Ordinal);
+                    Assert.StartsWith("A2 ", map.AttributeRows![0], StringComparison.Ordinal);
+                });
+            Assert.All(dump.Value.Tilemaps, map => Assert.StartsWith("sha256:", map.TileHash, StringComparison.Ordinal));
+            Assert.Equal("0xFF", session.ReadPpuState().Value.Vbk);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Trace_video_writes_correlates_vram_oam_and_ppu_register_writes_without_stopping_at_the_cap()
+    {
+        var romPath = CreateTestFilePath("managed-video-trace", ".gb");
+        CreateVideoWriteRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+
+            var trace = session.TraceVideoWrites(new VideoWriteTraceRequest(
+                FrameCount: 1,
+                MaxEvents: 3,
+                Kinds: new HashSet<VideoWriteKind>
+                {
+                    VideoWriteKind.Vram,
+                    VideoWriteKind.Oam,
+                    VideoWriteKind.PpuRegister,
+                },
+                PpuRegisters: VideoWriteTracing.DefaultPpuRegisters,
+                Buttons: []));
+
+            Assert.True(trace.IsSuccess, trace.Error?.Message);
+            Assert.Equal(1, trace.Value.FramesRun);
+            Assert.Equal(3, trace.Value.EventCount);
+            Assert.True(trace.Value.EventsObserved > trace.Value.EventCount);
+            Assert.True(trace.Value.Truncated);
+            Assert.Equal(
+                [VideoWriteKind.Vram, VideoWriteKind.Oam, VideoWriteKind.PpuRegister],
+                trace.Value.Events.Select(evt => evt.Kind));
+            Assert.Equal(["0x8000", "0xFE00", "0xFF40"], trace.Value.Events.Select(evt => evt.Address));
+            Assert.Equal(["0x0102", "0x0107", "0x0111"], trace.Value.Events.Select(evt => evt.Pc));
+            Assert.All(trace.Value.Events, evt =>
+            {
+                Assert.StartsWith("0x", evt.Pc, StringComparison.Ordinal);
+                Assert.NotNull(evt.Before);
+                Assert.NotNull(evt.After);
+            });
+            Assert.True(trace.Value.Events[1].InstructionCounter > trace.Value.Events[0].InstructionCounter);
+            Assert.Empty(trace.Value.Released.Pressed);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Trace_video_writes_stops_at_a_mid_frame_breakpoint_before_later_corruption()
+    {
+        var romPath = CreateTestFilePath("managed-video-breakpoint", ".gb");
+        CreateVideoWriteRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+            Assert.True(session.SetBreakpoint(0x010F, null).IsSuccess);
+
+            var trace = session.TraceVideoWrites(new VideoWriteTraceRequest(
+                1,
+                100,
+                VideoWriteTracing.DefaultKinds,
+                VideoWriteTracing.DefaultPpuRegisters,
+                []));
+
+            Assert.True(trace.IsSuccess, trace.Error?.Message);
+            Assert.Equal(0, trace.Value.FramesRun);
+            Assert.True(trace.Value.HitBreakpoint);
+            Assert.Equal("breakpoint", trace.Value.StopReason);
+            Assert.Equal(["0x8000", "0xFE00"], trace.Value.Events.Select(evt => evt.Address));
+            Assert.DoesNotContain(trace.Value.Events, evt => evt.Address == "0xFF40");
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Observe_execution_correlates_exact_frames_memory_ppu_tilemaps_and_bounded_video_writes()
+    {
+        var romPath = CreateTestFilePath("managed-execution-observation", ".gb");
+        CreateVideoWriteRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+
+            var observation = session.ObserveExecution(new ExecutionObservationRequest(
+                FrameCount: 2,
+                Buttons: [JoypadButton.Right],
+                MemoryProbes: [new MemoryProbe(0x8000, 1), new MemoryProbe(0xC000, 1)],
+                IncludePpuState: true,
+                TraceVideoWrites: true,
+                MaxVideoEvents: 1,
+                VideoKinds: VideoWriteTracing.DefaultKinds,
+                PpuRegisters: VideoWriteTracing.DefaultPpuRegisters));
+
+            Assert.True(observation.IsSuccess, observation.Error?.Message);
+            Assert.Equal(2, observation.Value.FramesRun);
+            Assert.Equal(["right"], observation.Value.HeldButtons);
+            Assert.Equal(2, observation.Value.Frames.Count);
+            Assert.All(observation.Value.Frames, frame =>
+            {
+                Assert.StartsWith("sha256:", frame.Screen.Hash, StringComparison.Ordinal);
+                Assert.Equal(2, frame.Memory.Count);
+                Assert.NotNull(frame.PpuState);
+                Assert.Equal("12", frame.Memory[0].BytesHex);
+                Assert.Equal("56", frame.Memory[1].BytesHex);
+            });
+            Assert.Single(observation.Value.VideoEvents);
+            Assert.True(observation.Value.VideoEventsObserved > observation.Value.VideoEventCount);
+            Assert.True(observation.Value.VideoTraceTruncated);
+            Assert.Equal(2, observation.Value.InitialTilemaps.Tilemaps.Count);
+            Assert.Equal(2, observation.Value.FinalTilemaps.Tilemaps.Count);
+            Assert.Empty(observation.Value.Released.Pressed);
+            Assert.Equal(ExecutionObserver.AppliedLimits, observation.Value.Limits);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Observe_execution_reports_a_mid_frame_breakpoint_before_sampling_an_incomplete_frame()
+    {
+        var romPath = CreateTestFilePath("managed-execution-breakpoint", ".gb");
+        CreateVideoWriteRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+            Assert.True(session.SetBreakpoint(0x010F, null).IsSuccess);
+
+            var observation = session.ObserveExecution(new ExecutionObservationRequest(
+                1,
+                [],
+                [],
+                IncludePpuState: false,
+                TraceVideoWrites: true,
+                MaxVideoEvents: 100,
+                VideoKinds: VideoWriteTracing.DefaultKinds,
+                PpuRegisters: VideoWriteTracing.DefaultPpuRegisters));
+
+            Assert.True(observation.IsSuccess, observation.Error?.Message);
+            Assert.Equal(0, observation.Value.FramesRun);
+            Assert.Empty(observation.Value.Frames);
+            Assert.True(observation.Value.HitBreakpoint);
+            Assert.Equal("breakpoint", observation.Value.StopReason);
+            Assert.Equal(["0x8000", "0xFE00"], observation.Value.VideoEvents.Select(evt => evt.Address));
+            Assert.Empty(observation.Value.Released.Pressed);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Run_frame_stops_at_an_interrupt_vector_before_the_handler_executes()
+    {
+        var romPath = CreateTestFilePath("managed-interrupt-breakpoint", ".gb");
+        CreateInterruptRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+            Assert.True(session.SetBreakpoint(0x0040, null).IsSuccess);
+
+            var run = session.RunFrame(2);
+
+            Assert.True(run.IsSuccess, run.Error?.Message);
+            Assert.Equal(0, run.Value.FramesRun);
+            Assert.True(run.Value.HitBreakpoint);
+            Assert.Equal("0x0040", run.Value.Registers.Pc);
+            Assert.Equal("00", session.ReadMemory(0xC000, 1).Value.BytesHex);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Trace_video_writes_observes_every_oam_dma_destination_write()
+    {
+        var romPath = CreateTestFilePath("managed-oam-dma-trace", ".gb");
+        CreateOamDmaRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+            Assert.True(session.WriteMemory(0xC000, Enumerable.Range(0, 0xA0).Select(value => (byte)value).ToArray()).IsSuccess);
+
+            var trace = session.TraceVideoWrites(new VideoWriteTraceRequest(
+                1,
+                200,
+                new HashSet<VideoWriteKind> { VideoWriteKind.Oam },
+                VideoWriteTracing.DefaultPpuRegisters,
+                []));
+
+            Assert.True(trace.IsSuccess, trace.Error?.Message);
+            Assert.Equal(0xA0, trace.Value.EventCount);
+            Assert.Equal(0xA0, trace.Value.EventsObserved);
+            Assert.False(trace.Value.Truncated);
+            Assert.Equal("0xFE00", trace.Value.Events[0].Address);
+            Assert.Equal("0x00", trace.Value.Events[0].Value);
+            Assert.Equal("0xFE9F", trace.Value.Events[^1].Address);
+            Assert.Equal("0x9F", trace.Value.Events[^1].Value);
+            Assert.Equal(
+                Enumerable.Range(0, 0xA0).Select(value => (byte)value),
+                session.ReadMemory(0xFE00, 0xA0).Value.Bytes);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Run_frame_without_breakpoints_completes_100_frames()
+    {
+        var romPath = CreateTestFilePath("managed-frame-fast-path", ".gb");
+        CreateMinimalRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+
+            var run = session.RunFrame(100);
+
+            Assert.True(run.IsSuccess, run.Error?.Message);
+            Assert.Equal(100, run.Value.FramesRun);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
     private static string CreateTestFilePath(string prefix, string extension)
     {
         var directory = Path.Combine(Path.GetTempPath(), "gameboy-mcp-tests");
@@ -456,7 +865,7 @@ public sealed class ManagedGameBoyDebugSessionIntegrationTests
         return Path.Combine(directory, $"{prefix}-{Guid.NewGuid():N}{extension}");
     }
 
-    private static void CreateMinimalRom(string path)
+    private static void CreateMinimalRom(string path, bool cgb = false)
     {
         var rom = Enumerable.Repeat((byte)0x00, 0x8000).ToArray();
         rom[0x100] = 0x3E; // LD A, 0x2A
@@ -468,6 +877,7 @@ public sealed class ManagedGameBoyDebugSessionIntegrationTests
         rom[0x106] = 0xFE;
         var title = "MCPTEST"u8.ToArray();
         Array.Copy(title, 0, rom, 0x134, title.Length);
+        rom[0x143] = cgb ? (byte)0x80 : (byte)0x00;
         rom[0x147] = 0x00;
         rom[0x148] = 0x00;
         rom[0x149] = 0x00;
@@ -490,6 +900,69 @@ public sealed class ManagedGameBoyDebugSessionIntegrationTests
         rom[0x147] = 0x00;
         rom[0x148] = 0x00;
         rom[0x149] = 0x00;
+        File.WriteAllBytes(path, rom);
+    }
+
+    private static void CreateVideoWriteRom(string path)
+    {
+        var rom = Enumerable.Repeat((byte)0x00, 0x8000).ToArray();
+        byte[] program =
+        [
+            0x3E, 0x12,       // LD A, $12
+            0xEA, 0x00, 0x80, // LD [$8000], A
+            0x3E, 0x34,       // LD A, $34
+            0xEA, 0x00, 0xFE, // LD [$FE00], A
+            0x3E, 0x56,       // LD A, $56
+            0xEA, 0x00, 0xC0, // LD [$C000], A
+            0x3E, 0x91,       // LD A, $91
+            0xE0, 0x40,       // LDH [$FF40], A
+            0x18, 0xEB,       // JR $0100
+        ];
+        Array.Copy(program, 0, rom, 0x100, program.Length);
+        var title = "MCPVIDEO"u8.ToArray();
+        Array.Copy(title, 0, rom, 0x134, title.Length);
+        rom[0x147] = 0x00;
+        rom[0x148] = 0x00;
+        rom[0x149] = 0x00;
+        File.WriteAllBytes(path, rom);
+    }
+
+    private static void CreateInterruptRom(string path)
+    {
+        var rom = Enumerable.Repeat((byte)0x00, 0x8000).ToArray();
+        byte[] program =
+        [
+            0x3E, 0x01,       // LD A, $01
+            0xEA, 0xFF, 0xFF, // LD [$FFFF], A - enable VBlank interrupt
+            0xFB,             // EI
+            0x00,             // NOP - allow EI to take effect
+            0x18, 0xFD,       // JR $0106
+        ];
+        byte[] handler =
+        [
+            0x3E, 0x99,       // LD A, $99
+            0xEA, 0x00, 0xC0, // LD [$C000], A
+            0xD9,             // RETI
+        ];
+        Array.Copy(program, 0, rom, 0x100, program.Length);
+        Array.Copy(handler, 0, rom, 0x0040, handler.Length);
+        var title = "MCPIRQ"u8.ToArray();
+        Array.Copy(title, 0, rom, 0x134, title.Length);
+        File.WriteAllBytes(path, rom);
+    }
+
+    private static void CreateOamDmaRom(string path)
+    {
+        var rom = Enumerable.Repeat((byte)0x00, 0x8000).ToArray();
+        byte[] program =
+        [
+            0x3E, 0xC0, // LD A, $C0
+            0xE0, 0x46, // LDH [$FF46], A
+            0x18, 0xFE, // JR $0104
+        ];
+        Array.Copy(program, 0, rom, 0x100, program.Length);
+        var title = "MCPDMA"u8.ToArray();
+        Array.Copy(title, 0, rom, 0x134, title.Length);
         File.WriteAllBytes(path, rom);
     }
 

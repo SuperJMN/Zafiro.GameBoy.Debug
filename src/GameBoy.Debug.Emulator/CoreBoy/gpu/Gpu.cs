@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using CoreBoy.cpu;
 using CoreBoy.gpu.phase;
@@ -145,7 +146,7 @@ namespace CoreBoy.gpu
 
             if (address == GpuRegister.Vbk.Address)
             {
-                return _gbc ? 0xfe : 0xff;
+                return _gbc ? 0xfe | (_r.Get(GpuRegister.Vbk) & 1) : 0xff;
             }
 
             return space.GetByte(address);
@@ -306,6 +307,22 @@ namespace CoreBoy.gpu
         public bool IsLcdEnabled()
         {
             return _lcdEnabled;
+        }
+
+        public bool TryCopyVideoRamBank(int bank, Span<byte> destination)
+        {
+            if (destination.Length < 0x2000 || bank is < 0 or > 1 || (bank == 1 && !_gbc))
+            {
+                return false;
+            }
+
+            var source = bank == 0 ? _videoRam0 : _videoRam1;
+            for (var offset = 0; offset < 0x2000; offset++)
+            {
+                destination[offset] = (byte)source.GetByte(0x8000 + offset);
+            }
+
+            return true;
         }
 
         public Lcdc GetLcdc()

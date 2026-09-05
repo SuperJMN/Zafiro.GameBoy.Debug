@@ -203,7 +203,71 @@ public sealed record PpuStateResult(
     [property: JsonPropertyName("lcdEnabled")] bool LcdEnabled,
     [property: JsonPropertyName("spritesEnabled")] bool SpritesEnabled,
     [property: JsonPropertyName("windowEnabled")] bool WindowEnabled,
-    [property: JsonPropertyName("backgroundEnabled")] bool BackgroundEnabled);
+    [property: JsonPropertyName("backgroundEnabled")] bool BackgroundEnabled)
+{
+    [JsonPropertyName("scanline")]
+    public int Scanline { get; init; }
+
+    [JsonPropertyName("dot")]
+    public int? Dot { get; init; }
+
+    [JsonPropertyName("timingAuthoritative")]
+    public bool TimingAuthoritative { get; init; }
+
+    [JsonPropertyName("vBlank")]
+    public bool VBlank { get; init; }
+
+    [JsonPropertyName("renderingActive")]
+    public bool RenderingActive { get; init; }
+
+    [JsonPropertyName("control")]
+    public PpuControlState Control { get; init; } = new(false, null, false, 8, "0x9800", "0x9000", true, false, "0x9800", false);
+
+    [JsonPropertyName("status")]
+    public PpuStatusState Status { get; init; } = new(0, "hblank", false, false, false, false, false);
+
+    [JsonPropertyName("timeline")]
+    public TimelineCounters Timeline { get; init; } = new(0, 0);
+}
+
+public sealed record PpuControlState(
+    [property: JsonPropertyName("backgroundWindowEnabled")] bool BackgroundWindowEnabled,
+    [property: JsonPropertyName("backgroundWindowPriorityEnabled")] bool? BackgroundWindowPriorityEnabled,
+    [property: JsonPropertyName("spritesEnabled")] bool SpritesEnabled,
+    [property: JsonPropertyName("spriteHeight")] int SpriteHeight,
+    [property: JsonPropertyName("backgroundTilemapAddress")] string BackgroundTilemapAddress,
+    [property: JsonPropertyName("tileDataAddress")] string TileDataAddress,
+    [property: JsonPropertyName("tileDataSigned")] bool TileDataSigned,
+    [property: JsonPropertyName("windowEnabled")] bool WindowEnabled,
+    [property: JsonPropertyName("windowTilemapAddress")] string WindowTilemapAddress,
+    [property: JsonPropertyName("lcdEnabled")] bool LcdEnabled);
+
+public sealed record PpuRegistersSnapshot(
+    byte Lcdc,
+    byte Stat,
+    byte Ly,
+    byte Lyc,
+    byte Scy,
+    byte Scx,
+    byte Wy,
+    byte Wx,
+    byte Bgp,
+    byte Obp0,
+    byte Obp1,
+    byte Vbk,
+    bool IsColor,
+    int? Dot,
+    bool TimingAuthoritative,
+    TimelineCounters Timeline);
+
+public sealed record PpuStatusState(
+    [property: JsonPropertyName("mode")] int Mode,
+    [property: JsonPropertyName("modeName")] string ModeName,
+    [property: JsonPropertyName("lycEqualsLy")] bool LycEqualsLy,
+    [property: JsonPropertyName("hblankInterruptEnabled")] bool HBlankInterruptEnabled,
+    [property: JsonPropertyName("vblankInterruptEnabled")] bool VBlankInterruptEnabled,
+    [property: JsonPropertyName("oamInterruptEnabled")] bool OamInterruptEnabled,
+    [property: JsonPropertyName("lycInterruptEnabled")] bool LycInterruptEnabled);
 
 public sealed record OamSprite(
     [property: JsonPropertyName("index")] int Index,
@@ -273,6 +337,96 @@ public sealed record TraceUntilWriteRangeResult(
     [property: JsonPropertyName("ppuState")] PpuStateResult PpuState,
     [property: JsonPropertyName("disassembly")] DisassembleResult Disassembly,
     [property: JsonPropertyName("timeline")] TimelineCounters Timeline);
+
+[JsonConverter(typeof(JsonStringEnumConverter<VideoWriteKind>))]
+public enum VideoWriteKind
+{
+    Vram,
+    Oam,
+    PpuRegister,
+}
+
+public sealed record VideoWriteTraceRequest(
+    int FrameCount,
+    int MaxEvents,
+    IReadOnlySet<VideoWriteKind> Kinds,
+    IReadOnlySet<ushort> PpuRegisters,
+    IReadOnlyList<JoypadButton> Buttons);
+
+public sealed record VideoWriteTraceResult(
+    [property: JsonPropertyName("framesRequested")] int FramesRequested,
+    [property: JsonPropertyName("framesRun")] int FramesRun,
+    [property: JsonPropertyName("initialPpuState")] PpuStateResult InitialPpuState,
+    [property: JsonPropertyName("finalPpuState")] PpuStateResult FinalPpuState,
+    [property: JsonPropertyName("events")] IReadOnlyList<VideoWriteEvent> Events,
+    [property: JsonPropertyName("eventCount")] int EventCount,
+    [property: JsonPropertyName("eventsObserved")] int EventsObserved,
+    [property: JsonPropertyName("truncated")] bool Truncated,
+    [property: JsonPropertyName("hitBreakpoint")] bool HitBreakpoint,
+    [property: JsonPropertyName("stopReason")] string StopReason,
+    [property: JsonPropertyName("released")] JoypadStateResult Released,
+    [property: JsonPropertyName("timeline")] TimelineCounters Timeline);
+
+public sealed record VideoWriteEvent(
+    [property: JsonPropertyName("frameOffset")] int FrameOffset,
+    [property: JsonPropertyName("frame")] ulong Frame,
+    [property: JsonPropertyName("cpuCycle")] ulong CpuCycle,
+    [property: JsonPropertyName("instructionCounter")] ulong InstructionCounter,
+    [property: JsonPropertyName("pc")] string Pc,
+    [property: JsonPropertyName("address")] string Address,
+    [property: JsonPropertyName("kind")] VideoWriteKind Kind,
+    [property: JsonPropertyName("registerName")] string? RegisterName,
+    [property: JsonPropertyName("value")] string Value,
+    [property: JsonPropertyName("vramBank")] int? VramBank,
+    [property: JsonPropertyName("before")] PpuStateResult Before,
+    [property: JsonPropertyName("after")] PpuStateResult After);
+
+public sealed record MemoryProbe(ushort Address, int Length);
+
+public sealed record ExecutionObservationRequest(
+    int FrameCount,
+    IReadOnlyList<JoypadButton> Buttons,
+    IReadOnlyList<MemoryProbe> MemoryProbes,
+    bool IncludePpuState,
+    bool TraceVideoWrites,
+    int MaxVideoEvents,
+    IReadOnlySet<VideoWriteKind> VideoKinds,
+    IReadOnlySet<ushort> PpuRegisters);
+
+public sealed record ExecutionObservationResult(
+    [property: JsonPropertyName("framesRequested")] int FramesRequested,
+    [property: JsonPropertyName("framesRun")] int FramesRun,
+    [property: JsonPropertyName("heldButtons")] IReadOnlyList<string> HeldButtons,
+    [property: JsonPropertyName("initialFramebufferHash")] string InitialFramebufferHash,
+    [property: JsonPropertyName("frames")] IReadOnlyList<ExecutionFrameObservation> Frames,
+    [property: JsonPropertyName("videoEvents")] IReadOnlyList<VideoWriteEvent> VideoEvents,
+    [property: JsonPropertyName("videoEventCount")] int VideoEventCount,
+    [property: JsonPropertyName("videoEventsObserved")] int VideoEventsObserved,
+    [property: JsonPropertyName("videoTraceTruncated")] bool VideoTraceTruncated,
+    [property: JsonPropertyName("initialTilemaps")] TilemapSetDumpResult InitialTilemaps,
+    [property: JsonPropertyName("finalTilemaps")] TilemapSetDumpResult FinalTilemaps,
+    [property: JsonPropertyName("hitBreakpoint")] bool HitBreakpoint,
+    [property: JsonPropertyName("stopReason")] string StopReason,
+    [property: JsonPropertyName("released")] JoypadStateResult Released,
+    [property: JsonPropertyName("limits")] ExecutionObservationAppliedLimits Limits,
+    [property: JsonPropertyName("timeline")] TimelineCounters Timeline);
+
+public sealed record ExecutionFrameObservation(
+    [property: JsonPropertyName("screen")] ScreenFrameObservation Screen,
+    [property: JsonPropertyName("memory")] IReadOnlyList<MemoryProbeObservation> Memory,
+    [property: JsonPropertyName("ppuState")] PpuStateResult? PpuState);
+
+public sealed record MemoryProbeObservation(
+    [property: JsonPropertyName("address")] string Address,
+    [property: JsonPropertyName("length")] int Length,
+    [property: JsonPropertyName("bytesHex")] string BytesHex);
+
+public sealed record ExecutionObservationAppliedLimits(
+    [property: JsonPropertyName("maxFrames")] int MaxFrames,
+    [property: JsonPropertyName("maxMemoryProbes")] int MaxMemoryProbes,
+    [property: JsonPropertyName("maxMemoryProbeLength")] int MaxMemoryProbeLength,
+    [property: JsonPropertyName("maxMemoryBytesPerFrame")] int MaxMemoryBytesPerFrame,
+    [property: JsonPropertyName("maxVideoEvents")] int MaxVideoEvents);
 
 public sealed record RunUntilConditionResult(
     [property: JsonPropertyName("stopped")] bool Stopped,
@@ -348,6 +502,33 @@ public sealed record ScreenRegionResult(
     [property: JsonPropertyName("rowHashes")] IReadOnlyList<string> RowHashes,
     [property: JsonPropertyName("screenToBgTile")] ScreenToBgTileMapping? ScreenToBgTile);
 
+public sealed record ScreenObservationResult(
+    [property: JsonPropertyName("framesRequested")] int FramesRequested,
+    [property: JsonPropertyName("framesRun")] int FramesRun,
+    [property: JsonPropertyName("initialHash")] string InitialHash,
+    [property: JsonPropertyName("samples")] IReadOnlyList<ScreenFrameObservation> Samples,
+    [property: JsonPropertyName("hitBreakpoint")] bool HitBreakpoint,
+    [property: JsonPropertyName("timeline")] TimelineCounters Timeline);
+
+public sealed record ScreenFrameObservation(
+    [property: JsonPropertyName("frameOffset")] int FrameOffset,
+    [property: JsonPropertyName("totalFrame")] ulong TotalFrame,
+    [property: JsonPropertyName("hash")] string Hash,
+    [property: JsonPropertyName("changedPixels")] int ChangedPixels,
+    [property: JsonPropertyName("changedTiles")] int ChangedTiles,
+    [property: JsonPropertyName("changedBounds")] ScreenChangeBounds? ChangedBounds,
+    [property: JsonPropertyName("changedTileRows")] IReadOnlyList<ScreenChangedTileRow> ChangedTileRows);
+
+public sealed record ScreenChangeBounds(
+    [property: JsonPropertyName("x")] int X,
+    [property: JsonPropertyName("y")] int Y,
+    [property: JsonPropertyName("width")] int Width,
+    [property: JsonPropertyName("height")] int Height);
+
+public sealed record ScreenChangedTileRow(
+    [property: JsonPropertyName("row")] int Row,
+    [property: JsonPropertyName("mask")] string Mask);
+
 public sealed record ScreenToBgTileMapping(
     [property: JsonPropertyName("tileX")] int TileX,
     [property: JsonPropertyName("tileY")] int TileY,
@@ -358,6 +539,19 @@ public sealed record TilemapDumpResult(
     [property: JsonPropertyName("width")] int Width,
     [property: JsonPropertyName("height")] int Height,
     [property: JsonPropertyName("rows")] IReadOnlyList<string> Rows);
+
+public sealed record TilemapSetDumpResult(
+    [property: JsonPropertyName("model")] string Model,
+    [property: JsonPropertyName("detailsIncluded")] bool DetailsIncluded,
+    [property: JsonPropertyName("tilemaps")] IReadOnlyList<TilemapSnapshot> Tilemaps,
+    [property: JsonPropertyName("timeline")] TimelineCounters Timeline);
+
+public sealed record TilemapSnapshot(
+    [property: JsonPropertyName("address")] string Address,
+    [property: JsonPropertyName("tileHash")] string TileHash,
+    [property: JsonPropertyName("attributeHash")] string? AttributeHash,
+    [property: JsonPropertyName("tileRows")] IReadOnlyList<string>? TileRows,
+    [property: JsonPropertyName("attributeRows")] IReadOnlyList<string>? AttributeRows);
 
 public sealed record TilesetDumpResult(
     [property: JsonPropertyName("address")] string Address,

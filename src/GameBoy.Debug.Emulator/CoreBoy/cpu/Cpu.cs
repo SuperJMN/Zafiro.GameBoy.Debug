@@ -30,9 +30,13 @@ namespace CoreBoy.cpu
         public Registers Registers { get; set; }
         public Opcode CurrentOpcode { get; private set; }
         public State State { get; private set; } = State.OPCODE;
+        public int InstructionAddress { get; private set; }
 
         // Added for gameboy-debug-mcp: expose the IME master flag (not memory-mapped) for register dumps.
         public bool InterruptMasterEnabled => _interruptManager.IsIme();
+
+        // Added for gameboy-debug-mcp: authoritative instruction retirement counter.
+        public Action InstructionCompleted { get; set; }
 
         private readonly IAddressSpace _addressSpace;
         private readonly InterruptManager _interruptManager;
@@ -124,6 +128,7 @@ namespace CoreBoy.cpu
                 {
                     case State.OPCODE:
                         ClearState();
+                        InstructionAddress = pc;
                         _opcode1 = _addressSpace.GetByte(pc);
                         accessedMemory = true;
                         if (_opcode1 == 0xcb)
@@ -205,6 +210,7 @@ namespace CoreBoy.cpu
                                 _display.Enabled = false;
                             }
 
+                            InstructionCompleted?.Invoke();
                             return;
                         }
                         else if (_opcode1 == 0x76)
@@ -213,11 +219,13 @@ namespace CoreBoy.cpu
                             {
                                 State = State.OPCODE;
                                 _haltBugMode = true;
+                                InstructionCompleted?.Invoke();
                                 return;
                             }
                             else
                             {
                                 State = State.HALTED;
+                                InstructionCompleted?.Invoke();
                                 return;
                             }
                         }
@@ -264,6 +272,7 @@ namespace CoreBoy.cpu
                             State = State.OPCODE;
                             _operandIndex = 0;
                             _interruptManager.OnInstructionFinished();
+                            InstructionCompleted?.Invoke();
                             return;
                         }
 

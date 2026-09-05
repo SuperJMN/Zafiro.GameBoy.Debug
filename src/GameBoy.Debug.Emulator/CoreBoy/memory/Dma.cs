@@ -4,6 +4,7 @@ namespace CoreBoy.memory
 {
     public class Dma : IAddressSpace
     {
+        private readonly Mmu _mmu;
         private readonly IAddressSpace _addressSpace;
         private readonly IAddressSpace _oam;
         private readonly SpeedMode _speedMode;
@@ -14,8 +15,9 @@ namespace CoreBoy.memory
         private int _ticks;
         private int _regValue = 0xff;
 
-        public Dma(IAddressSpace addressSpace, IAddressSpace oam, SpeedMode speedMode)
+        public Dma(Mmu addressSpace, IAddressSpace oam, SpeedMode speedMode)
         {
+            _mmu = addressSpace;
             _addressSpace = new DmaAddressSpace(addressSpace);
             _speedMode = speedMode;
             _oam = oam;
@@ -34,10 +36,10 @@ namespace CoreBoy.memory
             _transferInProgress = false;
             _restarted = false;
             _ticks = 0;
-            
+
             for (var i = 0; i < 0xa0; i++)
             {
-                _oam.SetByte(0xfe00 + i, _addressSpace.GetByte(_from + i));
+                _mmu.SetByte(_oam, 0xfe00 + i, _addressSpace.GetByte(_from + i));
             }
         }
 
