@@ -179,6 +179,35 @@ public sealed class SameBoyDebugSessionIntegrationTests
     }
 
     [Fact]
+    public void Observe_screen_rejects_breakpoints_that_the_native_frame_api_cannot_honor()
+    {
+        if (!NativeBridgeExists())
+        {
+            return;
+        }
+
+        var romPath = CreateTestFilePath("sameboy-observe-breakpoint", ".gb");
+        CreateMinimalRom(romPath);
+
+        try
+        {
+            using var session = new SameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+            Assert.True(session.SetBreakpoint(0x0100, null).IsSuccess);
+
+            var observation = session.ObserveScreen(1);
+
+            Assert.False(observation.IsSuccess);
+            Assert.Equal("screen_observation_breakpoints_not_supported", observation.Error?.Code);
+            Assert.Equal("0x0100", session.ReadRegisters().Value.Pc);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
     public void Set_joypad_drives_sameboy_joyp_reads()
     {
         if (!NativeBridgeExists())

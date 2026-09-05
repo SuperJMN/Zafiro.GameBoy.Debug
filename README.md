@@ -151,7 +151,7 @@ See [docs/mcp-tools.md](docs/mcp-tools.md) for schemas and examples.
 - Conditional breakpoints and `run_until_condition` are evaluated by the C# session loop and support register, PPU/IO alias, and memory comparisons such as `A == 0x10`, `LY >= 0x90`, `SCX == 4`, `HL >= 0xC000`, and `[HL] < 4`.
 - `.sym` parsing is intentionally simple: `BANK:ADDR Name` and `ADDR Name` lines with `;` or `#` comments.
 - `capture_screen` returns inline PNG image content unless a safe relative `.png` artifact path is provided.
-- Exact continuous video-write correlation and atomic CGB tilemap-bank snapshots require the managed CoreBoy backend used by the MCP host. The legacy SameBoy project still supports `observe_screen`, but reports explicit `not_supported` results for those managed-only workflows.
+- Exact continuous video-write correlation and atomic CGB tilemap-bank snapshots require the managed CoreBoy backend used by the MCP host. The legacy SameBoy project supports `observe_screen` only when no managed breakpoints are set, because its native frame API cannot stop within a frame, and reports explicit `not_supported` results for managed-only workflows.
 - Savestates capture CPU registers and all CPU-visible RAM/IO; MBC bank selection and sub-frame PPU/APU timing are not captured, so save/restore is intended at frame boundaries.
 
 ## Emulator Core

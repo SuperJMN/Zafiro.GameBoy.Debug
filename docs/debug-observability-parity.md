@@ -6,7 +6,7 @@ The NesMcp `deterministic PPU observability` work introduced four capabilities n
 | --- | --- | --- |
 | `observe_screen` | `observe_screen` | Hashes exact RGB24 output so distinct CGB colors are never collapsed into the same DMG shade. |
 | `observe_execution` | `observe_execution` | Correlates framebuffer changes, safe RAM/VRAM/OAM probes, PPU state, both tilemaps, input, breakpoints, and video writes. |
-| `trace_ppu_register_writes` | `trace_video_writes` | Includes direct VRAM and OAM writes as well as LCD/PPU registers because GB has no NES-style `$2007` data port. |
+| `trace_ppu_register_writes` | `trace_video_writes` | Includes direct VRAM writes, CPU and DMA OAM writes, and LCD/PPU registers because GB has no NES-style `$2007` data port. |
 | `dump_nametables` | `dump_tilemaps` | Snapshots `$9800/$9C00`; CGB attributes come from VRAM bank 1 and the selected `VBK` is preserved. |
 
 The supporting primitives were also aligned:
@@ -23,4 +23,4 @@ The supporting primitives were also aligned:
 4. Reload state, replay to the focal frame, and use `trace_video_writes` with narrower kinds/registers.
 5. Reload again and stop at the relevant PC or memory condition for instruction-level inspection with `read_ppu_state`, `read_screen_region` raw formats, `dump_tilemaps`, `dump_oam`, and `dump_tileset`.
 
-The MCP host uses the managed CoreBoy backend, which implements the complete workflow and supplies authoritative dot timing. The legacy SameBoy project supports exact `observe_screen` capture but does not expose the managed core hooks required for continuous write correlation or atomic VRAM-bank snapshots; its PPU state therefore returns `dot: null` with `timingAuthoritative: false`.
+The MCP host uses the managed CoreBoy backend, which implements the complete workflow and supplies authoritative dot timing. The legacy SameBoy project supports exact `observe_screen` capture only when no managed breakpoints are set; its native frame API cannot honor sub-frame breakpoint stops. SameBoy also does not expose the managed core hooks required for continuous write correlation or atomic VRAM-bank snapshots, and its PPU state therefore returns `dot: null` with `timingAuthoritative: false`.

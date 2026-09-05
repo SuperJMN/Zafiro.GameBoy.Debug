@@ -88,7 +88,6 @@ namespace GameBoy.Debug.Emulator
         private ulong totalCycles;
         private ulong totalFrames;
         private ulong totalInstructions;
-        private bool instructionRetired;
 
         public DebugResult<LoadRomResult> LoadRom(string path)
         {
@@ -123,11 +122,7 @@ namespace GameBoy.Debug.Emulator
             display = new FrameBufferDisplay();
             controller = new HeadlessController();
             gameboy = new Gameboy(options, cartridge, display, controller, new NullSoundOutput(), new NullSerialEndpoint());
-            gameboy.Cpu.InstructionCompleted = () =>
-            {
-                totalInstructions++;
-                instructionRetired = true;
-            };
+            gameboy.Cpu.InstructionCompleted = () => totalInstructions++;
             gameboy.Mmu.BeforeWriteObserver = OnBeforeMemoryWrite;
             gameboy.Mmu.WriteObserver = OnMemoryWrite;
             gameboy.Mmu.ReadObserver = null;
@@ -203,24 +198,6 @@ namespace GameBoy.Debug.Emulator
             }
 
             watchHit = null;
-            var initialRegisters = ReadRegisters();
-            if (!initialRegisters.IsSuccess)
-            {
-                return DebugResult<RunFrameResult>.Failure(initialRegisters.Error!.Code, initialRegisters.Error.Message);
-            }
-
-            var initialBreakpoint = IsBreakpointHit(ParseWord(initialRegisters.Value.Pc), initialRegisters.Value);
-            if (!initialBreakpoint.IsSuccess)
-            {
-                return DebugResult<RunFrameResult>.Failure(initialBreakpoint.Error!.Code, initialBreakpoint.Error.Message);
-            }
-
-            if (initialBreakpoint.Value)
-            {
-                return DebugResult<RunFrameResult>.Success(
-                    new RunFrameResult(0, initialRegisters.Value, true, GetTimeline()));
-            }
-
             var framesRun = 0;
             AttachReadObserverIfNeeded();
             try
@@ -228,12 +205,17 @@ namespace GameBoy.Debug.Emulator
                 for (var i = 0; i < count; i++)
                 {
                     var completed = RunSingleFrame();
-                    if (completed)
+                    if (!completed.IsSuccess)
+                    {
+                        return DebugResult<RunFrameResult>.Failure(completed.Error!.Code, completed.Error.Message);
+                    }
+
+                    if (completed.Value)
                     {
                         framesRun++;
                     }
 
-                    if (!completed || watchHit.HasValue)
+                    if (!completed.Value || watchHit.HasValue)
                     {
                         break;
                     }
@@ -1785,37 +1767,44 @@ namespace GameBoy.Debug.Emulator
             }
         }
 
-        private bool RunSingleFrame()
+        private DebugResult<bool> RunSingleFrame()
         {
             var previousTrackReads = trackReads;
             trackReads = gameboy.Mmu.ReadObserver != null;
-            instructionRetired = false;
+            var checkBreakpoints = breakpoints.HasAny;
             try
             {
                 for (var cycle = 0; cycle < CyclesPerFrame; cycle++)
                 {
+                    var cpu = gameboy.Cpu;
+                    if (checkBreakpoints && cpu.State == State.OPCODE && breakpoints.HasBreakpointAt((ushort)cpu.Registers.PC))
+                    {
+                        var registers = ReadRegisters();
+                        if (!registers.IsSuccess)
+                        {
+                            return DebugResult<bool>.Failure(registers.Error!.Code, registers.Error.Message);
+                        }
+
+                        var breakpoint = IsBreakpointHit((ushort)cpu.Registers.PC, registers.Value);
+                        if (!breakpoint.IsSuccess)
+                        {
+                            return DebugResult<bool>.Failure(breakpoint.Error!.Code, breakpoint.Error.Message);
+                        }
+
+                        if (breakpoint.Value)
+                        {
+                            return DebugResult<bool>.Success(false);
+                        }
+                    }
+
                     TickOnce();
                     if (watchHit.HasValue)
                     {
-                        return false;
-                    }
-
-                    if (instructionRetired)
-                    {
-                        instructionRetired = false;
-                        var registers = ReadRegisters();
-                        if (registers.IsSuccess)
-                        {
-                            var breakpoint = IsBreakpointHit(ParseWord(registers.Value.Pc), registers.Value);
-                            if (breakpoint.IsSuccess && breakpoint.Value)
-                            {
-                                return false;
-                            }
-                        }
+                        return DebugResult<bool>.Success(false);
                     }
                 }
 
-                return true;
+                return DebugResult<bool>.Success(true);
             }
             finally
             {

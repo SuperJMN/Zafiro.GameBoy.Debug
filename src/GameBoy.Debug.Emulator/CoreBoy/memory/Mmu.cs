@@ -23,8 +23,13 @@ namespace CoreBoy.memory
 
         public void SetByte(int address, int value)
         {
+            SetByte(GetSpace(address), address, value);
+        }
+
+        internal void SetByte(IAddressSpace target, int address, int value)
+        {
             BeforeWriteObserver?.Invoke(address, value);
-            GetSpace(address).SetByte(address, value);
+            target.SetByte(address, value);
             WriteObserver?.Invoke(address, value);
         }
 

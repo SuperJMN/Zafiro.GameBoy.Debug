@@ -7,6 +7,8 @@ public sealed class BreakpointCollection
 
     public IReadOnlyCollection<BreakpointInfo> All => byId.Values.ToArray();
 
+    public bool HasAny => byId.Values.Any(breakpoint => breakpoint.Enabled);
+
     public BreakpointInfo Set(ushort address, string? condition, BreakpointCondition? parsedCondition = null)
     {
         if (parsedCondition is null)

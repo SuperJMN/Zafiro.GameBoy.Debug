@@ -103,7 +103,7 @@ Atomically runs up to 600 complete frames. Every sample contains a SHA-256 ident
 { "frameCount": 120 }
 ```
 
-Save state before a suspicious sequence, use the returned `frameOffset` to find the transient frame, reload, then replay to the focal frame for exact region, tilemap, OAM, or video-write evidence. Observation stops without sampling an incomplete frame when execution reaches a breakpoint.
+Save state before a suspicious sequence, use the returned `frameOffset` to find the transient frame, reload, then replay to the focal frame for exact region, tilemap, OAM, or video-write evidence. Observation stops without sampling an incomplete frame when execution reaches a breakpoint. The legacy SameBoy adapter rejects screen observation while managed breakpoints are set because its native frame API cannot stop within a frame; clear them or use the managed backend.
 
 ## observe_execution
 
@@ -137,7 +137,7 @@ The event payload truncates at `maxVideoEvents` while execution continues. Compa
 
 ## trace_video_writes
 
-Continuously records selected direct VRAM writes, OAM writes, and LCD/PPU-register writes for up to 600 frames. This is the Game Boy equivalent of NES PPU-register tracing: Game Boy writes tile/sprite data directly to memory instead of routing it through one `PPUDATA` register.
+Continuously records selected direct VRAM writes, OAM writes (including all 160 OAM DMA destination writes), and LCD/PPU-register writes for up to 600 frames. This is the Game Boy equivalent of NES PPU-register tracing: Game Boy writes tile/sprite data directly to memory instead of routing it through one `PPUDATA` register.
 
 ```json
 {

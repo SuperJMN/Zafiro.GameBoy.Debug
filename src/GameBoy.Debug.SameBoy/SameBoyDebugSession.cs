@@ -763,8 +763,17 @@ public sealed class SameBoyDebugSession : IGameBoyDebugSession, IRgbFrameSource,
         return DebugResult<ScreenRegionResult>.Failure("screen_region_not_supported", "Screen region probes are only supported by the managed backend.");
     }
 
-    public DebugResult<ScreenObservationResult> ObserveScreen(int frameCount) =>
-        ScreenObserver.Observe(this, frameCount);
+    public DebugResult<ScreenObservationResult> ObserveScreen(int frameCount)
+    {
+        if (breakpoints.HasAny)
+        {
+            return DebugResult<ScreenObservationResult>.Failure(
+                "screen_observation_breakpoints_not_supported",
+                "The SameBoy frame API cannot stop at managed breakpoints during screen observation. Clear breakpoints or use the managed backend.");
+        }
+
+        return ScreenObserver.Observe(this, frameCount);
+    }
 
     public DebugResult<ExecutionObservationResult> ObserveExecution(ExecutionObservationRequest request) =>
         DebugResult<ExecutionObservationResult>.Failure(

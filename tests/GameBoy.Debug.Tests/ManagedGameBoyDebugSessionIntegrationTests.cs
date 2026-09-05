@@ -773,6 +773,91 @@ public sealed class ManagedGameBoyDebugSessionIntegrationTests
         }
     }
 
+    [Fact]
+    public void Run_frame_stops_at_an_interrupt_vector_before_the_handler_executes()
+    {
+        var romPath = CreateTestFilePath("managed-interrupt-breakpoint", ".gb");
+        CreateInterruptRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+            Assert.True(session.SetBreakpoint(0x0040, null).IsSuccess);
+
+            var run = session.RunFrame(2);
+
+            Assert.True(run.IsSuccess, run.Error?.Message);
+            Assert.Equal(0, run.Value.FramesRun);
+            Assert.True(run.Value.HitBreakpoint);
+            Assert.Equal("0x0040", run.Value.Registers.Pc);
+            Assert.Equal("00", session.ReadMemory(0xC000, 1).Value.BytesHex);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Trace_video_writes_observes_every_oam_dma_destination_write()
+    {
+        var romPath = CreateTestFilePath("managed-oam-dma-trace", ".gb");
+        CreateOamDmaRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+            Assert.True(session.WriteMemory(0xC000, Enumerable.Range(0, 0xA0).Select(value => (byte)value).ToArray()).IsSuccess);
+
+            var trace = session.TraceVideoWrites(new VideoWriteTraceRequest(
+                1,
+                200,
+                new HashSet<VideoWriteKind> { VideoWriteKind.Oam },
+                VideoWriteTracing.DefaultPpuRegisters,
+                []));
+
+            Assert.True(trace.IsSuccess, trace.Error?.Message);
+            Assert.Equal(0xA0, trace.Value.EventCount);
+            Assert.Equal(0xA0, trace.Value.EventsObserved);
+            Assert.False(trace.Value.Truncated);
+            Assert.Equal("0xFE00", trace.Value.Events[0].Address);
+            Assert.Equal("0x00", trace.Value.Events[0].Value);
+            Assert.Equal("0xFE9F", trace.Value.Events[^1].Address);
+            Assert.Equal("0x9F", trace.Value.Events[^1].Value);
+            Assert.Equal(
+                Enumerable.Range(0, 0xA0).Select(value => (byte)value),
+                session.ReadMemory(0xFE00, 0xA0).Value.Bytes);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
+    [Fact]
+    public void Run_frame_without_breakpoints_completes_100_frames()
+    {
+        var romPath = CreateTestFilePath("managed-frame-fast-path", ".gb");
+        CreateMinimalRom(romPath);
+
+        try
+        {
+            using var session = new ManagedGameBoyDebugSession();
+            Assert.True(session.LoadRom(romPath).IsSuccess);
+
+            var run = session.RunFrame(100);
+
+            Assert.True(run.IsSuccess, run.Error?.Message);
+            Assert.Equal(100, run.Value.FramesRun);
+        }
+        finally
+        {
+            File.Delete(romPath);
+        }
+    }
+
     private static string CreateTestFilePath(string prefix, string extension)
     {
         var directory = Path.Combine(Path.GetTempPath(), "gameboy-mcp-tests");
@@ -839,6 +924,45 @@ public sealed class ManagedGameBoyDebugSessionIntegrationTests
         rom[0x147] = 0x00;
         rom[0x148] = 0x00;
         rom[0x149] = 0x00;
+        File.WriteAllBytes(path, rom);
+    }
+
+    private static void CreateInterruptRom(string path)
+    {
+        var rom = Enumerable.Repeat((byte)0x00, 0x8000).ToArray();
+        byte[] program =
+        [
+            0x3E, 0x01,       // LD A, $01
+            0xEA, 0xFF, 0xFF, // LD [$FFFF], A - enable VBlank interrupt
+            0xFB,             // EI
+            0x00,             // NOP - allow EI to take effect
+            0x18, 0xFD,       // JR $0106
+        ];
+        byte[] handler =
+        [
+            0x3E, 0x99,       // LD A, $99
+            0xEA, 0x00, 0xC0, // LD [$C000], A
+            0xD9,             // RETI
+        ];
+        Array.Copy(program, 0, rom, 0x100, program.Length);
+        Array.Copy(handler, 0, rom, 0x0040, handler.Length);
+        var title = "MCPIRQ"u8.ToArray();
+        Array.Copy(title, 0, rom, 0x134, title.Length);
+        File.WriteAllBytes(path, rom);
+    }
+
+    private static void CreateOamDmaRom(string path)
+    {
+        var rom = Enumerable.Repeat((byte)0x00, 0x8000).ToArray();
+        byte[] program =
+        [
+            0x3E, 0xC0, // LD A, $C0
+            0xE0, 0x46, // LDH [$FF46], A
+            0x18, 0xFE, // JR $0104
+        ];
+        Array.Copy(program, 0, rom, 0x100, program.Length);
+        var title = "MCPDMA"u8.ToArray();
+        Array.Copy(title, 0, rom, 0x134, title.Length);
         File.WriteAllBytes(path, rom);
     }
 
