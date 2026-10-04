@@ -1,6 +1,6 @@
-# GameBoy.Mcp
+# Zafiro.GameBoy.Debug.Mcp
 
-`GameBoy.Mcp` is a cross-platform .NET MCP server for inspecting and controlling a Game Boy or Game Boy Color ROM. It includes bounded workflows for correlating transient screen corruption with RAM, tilemap, PPU, VRAM, OAM, and LCD-register state. It is distributed as a .NET tool (command: `gameboymcp`).
+`Zafiro.GameBoy.Debug.Mcp` is a cross-platform .NET MCP server for inspecting and controlling a Game Boy or Game Boy Color ROM. It includes bounded workflows for correlating transient screen corruption with RAM, tilemap, PPU, VRAM, OAM, and LCD-register state. It is distributed as a .NET tool (command: `zafiro-gameboy-debug-mcp`).
 
 The emulator core is **pure managed C#** (a trimmed, vendored copy of the MIT-licensed [CoreBoy](https://github.com/davidwhitney/CoreBoy), itself a port of [coffee-gb](https://github.com/trekawek/coffee-gb)). There are **no native dependencies**, so a single package runs anywhere .NET 10 runs — Windows, macOS and Linux, on x64 and arm64.
 
@@ -9,14 +9,14 @@ The emulator core is **pure managed C#** (a trimmed, vendored copy of the MIT-li
 Run it on demand with .NET 10's `dnx` (no install required):
 
 ```bash
-dnx GameBoy.Mcp
+dnx Zafiro.GameBoy.Debug.Mcp
 ```
 
 Or install it globally:
 
 ```bash
-dotnet tool install -g GameBoy.Mcp
-gameboymcp
+dotnet tool install -g Zafiro.GameBoy.Debug.Mcp
+zafiro-gameboy-debug-mcp
 ```
 
 ## Build
@@ -28,7 +28,7 @@ Requirements:
 Build the solution:
 
 ```bash
-dotnet build gameboy-debug-mcp.slnx
+dotnet build Zafiro.GameBoy.Debug.slnx
 ```
 
 That's it — no native toolchain or build step is required.
@@ -38,7 +38,7 @@ That's it — no native toolchain or build step is required.
 From the repo root:
 
 ```bash
-dotnet run --project src/GameBoy.Debug.Mcp/GameBoy.Debug.Mcp.csproj
+dotnet run --project src/Zafiro.GameBoy.Debug.Mcp/Zafiro.GameBoy.Debug.Mcp.csproj
 ```
 
 Screen captures are returned inline as PNG images over MCP by default. Pass a safe relative `.png` path to `capture_screen` when you want a file artifact written under the current working directory.
@@ -52,19 +52,19 @@ Use stdio transport. With the tool installed (or via `dnx`), the client entry is
   "mcpServers": {
     "gameboy": {
       "command": "dnx",
-      "args": ["GameBoy.Mcp", "--yes"]
+      "args": ["Zafiro.GameBoy.Debug.Mcp", "--yes"]
     }
   }
 }
 ```
 
-If you installed the tool globally (`dotnet tool install -g GameBoy.Mcp`), use the command directly:
+If you installed the tool globally (`dotnet tool install -g Zafiro.GameBoy.Debug.Mcp`), use the command directly:
 
 ```json
 {
   "mcpServers": {
     "gameboy": {
-      "command": "gameboymcp"
+      "command": "zafiro-gameboy-debug-mcp"
     }
   }
 }
@@ -77,7 +77,7 @@ For development against a local checkout you can still run it from source:
   "mcpServers": {
     "gameboy": {
       "command": "dotnet",
-      "args": ["run", "--project", "src/GameBoy.Debug.Mcp/GameBoy.Debug.Mcp.csproj"]
+      "args": ["run", "--project", "src/Zafiro.GameBoy.Debug.Mcp/Zafiro.GameBoy.Debug.Mcp.csproj"]
     }
   }
 }
@@ -89,7 +89,7 @@ The current source exposes 42 MCP tools through the server's real `tools/list` o
 
 Some MCP clients, including Codex, may initially show only the subset of tools that has been surfaced to the current model session. Do not treat that initial visible subset as the complete server capability list. If tools such as `capture_screen` or `run_input_timeline` appear to be missing:
 
-1. Verify that the active client entry runs the current package, for example `dnx GameBoy.Mcp --yes` or `gameboymcp`.
+1. Verify that the active client entry runs the current package, for example `dnx Zafiro.GameBoy.Debug.Mcp --yes` or `zafiro-gameboy-debug-mcp`.
 2. In Codex, inspect the configured MCP server with `/mcp verbose` and confirm that it points at the expected command.
 3. Ask Codex to search for the exact advanced tool names, for example `gameboy_debug load_rom run_input_timeline capture_screen dump_oam read_screen_region`.
 4. When in doubt, use an MCP inspector or direct MCP client probe against the same command and check the actual `tools/list` response. A local build of the current source should report 42 tools.
@@ -156,27 +156,27 @@ See [docs/mcp-tools.md](docs/mcp-tools.md) for schemas and examples.
 
 ## Emulator Core
 
-The emulator is a pure-managed C# core: a trimmed, vendored copy of [CoreBoy](https://github.com/davidwhitney/CoreBoy) by David Whitney (MIT), itself a C# port of [coffee-gb](https://github.com/trekawek/coffee-gb) by Tomasz Rękawek (MIT). Only the emulation core is kept (CPU, MMU, PPU, timers, interrupts, sound, serial, cartridge mappers); UI/audio frontends and their dependencies are removed. See [`src/GameBoy.Debug.Emulator/THIRD-PARTY-NOTICES.md`](src/GameBoy.Debug.Emulator/THIRD-PARTY-NOTICES.md) for full attribution, license texts, and the list of modifications.
+The emulator is a pure-managed C# core: a trimmed, vendored copy of [CoreBoy](https://github.com/davidwhitney/CoreBoy) by David Whitney (MIT), itself a C# port of [coffee-gb](https://github.com/trekawek/coffee-gb) by Tomasz Rękawek (MIT). Only the emulation core is kept (CPU, MMU, PPU, timers, interrupts, sound, serial, cartridge mappers); UI/audio frontends and their dependencies are removed. See [`src/Zafiro.GameBoy.Debug.Emulator/THIRD-PARTY-NOTICES.md`](src/Zafiro.GameBoy.Debug.Emulator/THIRD-PARTY-NOTICES.md) for full attribution, license texts, and the list of modifications.
 
-A legacy, optional native backend (`GameBoy.Debug.SameBoy`) links against [SameBoy](https://github.com/LIJI32/SameBoy) by Lior Halphon (Expat/MIT). SameBoy is not vendored and is not part of the published tool; it is cloned and built from source only if a developer opts in.
+A legacy, optional native backend (`Zafiro.GameBoy.Debug.SameBoy`) links against [SameBoy](https://github.com/LIJI32/SameBoy) by Lior Halphon (Expat/MIT). SameBoy is not vendored and is not part of the published tool; it is cloned and built from source only if a developer opts in.
 
 ## License
 
 This project is licensed under the [MIT License](LICENSE) © José Manuel Nieto (@SuperJMN).
 
-It includes third-party software under its own license. The vendored CoreBoy core (MIT) is distributed inside the `GameBoy.Mcp` package; its copyright notice and the notices for all third-party components are reproduced in [`THIRD-PARTY-NOTICES.md`](src/GameBoy.Debug.Emulator/THIRD-PARTY-NOTICES.md), which is also bundled in the published package. All third-party authors retain full ownership of their work.
+It includes third-party software under its own license. The vendored CoreBoy core (MIT) is distributed inside the `Zafiro.GameBoy.Debug.Mcp` package; its copyright notice and the notices for all third-party components are reproduced in [`THIRD-PARTY-NOTICES.md`](src/Zafiro.GameBoy.Debug.Emulator/THIRD-PARTY-NOTICES.md), which is also bundled in the published package. All third-party authors retain full ownership of their work.
 
 ## Test
 
 ```bash
-dotnet test gameboy-debug-mcp.slnx
+dotnet test Zafiro.GameBoy.Debug.slnx
 ```
 
 The managed-core integration tests run on every platform with no native dependency. If the optional SameBoy native library (`native/out/linux-x64/libgameboy_debug_sameboy.so`) exists, the legacy SameBoy integration tests also run.
 
 ## Deployment
 
-Distribution is handled by [DotnetDeployer](https://github.com/SuperJMN/DotnetDeployer), configured in [`deployer.yaml`](deployer.yaml). It packs the `GameBoy.Mcp` tool and pushes it to NuGet. Because the emulator core is pure managed C#, the package is a single architecture-agnostic artifact that runs on every platform — no per-RID native builds.
+Distribution is handled by [DotnetDeployer](https://github.com/SuperJMN/DotnetDeployer), configured in [`deployer.yaml`](deployer.yaml). It packs the `Zafiro.GameBoy.Debug.Mcp` tool and pushes it to NuGet. Because the emulator core is pure managed C#, the package is a single architecture-agnostic artifact that runs on every platform — no per-RID native builds.
 
 Publish locally (requires the `NUGET_API_KEY` environment variable):
 

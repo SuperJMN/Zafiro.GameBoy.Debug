@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Zafiro.GameBoy.Debug.Core\Zafiro.GameBoy.Debug.Core.csproj" />
+    <ProjectReference Include="..\Zafiro.GameBoy.Debug.Symbols\Zafiro.GameBoy.Debug.Symbols.csproj" />
+    <ProjectReference Include="..\Zafiro.GameBoy.Debug.Emulator\Zafiro.GameBoy.Debug.Emulator.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.9" />
+    <PackageReference Include="ModelContextProtocol" Version="1.4.0" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Zafiro.GameBoy.Debug.Mcp</AssemblyName>
+    <RootNamespace>Zafiro.GameBoy.Debug.Mcp</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- Distribution as a .NET tool (install with `dotnet tool install -g Zafiro.GameBoy.Debug.Mcp` or run with `dnx Zafiro.GameBoy.Debug.Mcp`) -->
+  <PropertyGroup>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>zafiro-gameboy-debug-mcp</ToolCommandName>
+    <PackageId>Zafiro.GameBoy.Debug.Mcp</PackageId>
+    <Title>Zafiro.GameBoy.Debug.Mcp</Title>
+    <Description>Cross-platform MCP server for inspecting and controlling Game Boy and Game Boy Color ROMs. Exposes CPU stepping, breakpoints, memory, PPU/VRAM inspection, savestates and inline screen captures over the Model Context Protocol. Pure managed core (no native dependencies).</Description>
+    <Authors>SuperJMN</Authors>
+    <Company>José Manuel Nieto (@SuperJMN)</Company>
+    <Product>Zafiro.GameBoy.Debug.Mcp</Product>
+    <PackageTags>mcp;model-context-protocol;gameboy;gameboy-color;debugger;emulator;ai</PackageTags>
+    <PackageProjectUrl>https://github.com/SuperJMN/Zafiro.GameBoy.Debug</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/SuperJMN/Zafiro.GameBoy.Debug</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
+    <None Include="..\Zafiro.GameBoy.Debug.Emulator\THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="" Visible="false" />
+  </ItemGroup>
+
+</Project>
