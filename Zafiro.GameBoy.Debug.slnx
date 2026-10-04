@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Zafiro.GameBoy.Debug.Emulator/Zafiro.GameBoy.Debug.Emulator.csproj" />
+    <Project Path="src/Zafiro.GameBoy.Debug.Core/Zafiro.GameBoy.Debug.Core.csproj" />
+    <Project Path="src/Zafiro.GameBoy.Debug.Mcp/Zafiro.GameBoy.Debug.Mcp.csproj" />
+    <Project Path="src/Zafiro.GameBoy.Debug.SameBoy/Zafiro.GameBoy.Debug.SameBoy.csproj" />
+    <Project Path="src/Zafiro.GameBoy.Debug.Symbols/Zafiro.GameBoy.Debug.Symbols.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Zafiro.GameBoy.Debug.Tests/Zafiro.GameBoy.Debug.Tests.csproj" />
+  </Folder>
+</Solution>
