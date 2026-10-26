@@ -176,7 +176,15 @@ The managed-core integration tests run on every platform with no native dependen
 
 ## Deployment
 
-Distribution is handled by [DotnetDeployer](https://github.com/SuperJMN/DotnetDeployer), configured in [`deployer.yaml`](deployer.yaml). It packs the `Zafiro.GameBoy.Debug.Mcp` tool and pushes it to NuGet. Because the emulator core is pure managed C#, the package is a single architecture-agnostic artifact that runs on every platform — no per-RID native builds.
+Distribution is handled by [DotnetDeployer](https://github.com/SuperJMN/DotnetDeployer), configured in [`deployer.yaml`](deployer.yaml). It packs every packable project and pushes it to NuGet: the `Zafiro.GameBoy.Debug.Mcp` tool and the libraries it is built on, for other programs that drive the emulator directly:
+
+| Package | Contents |
+|---------|----------|
+| `Zafiro.GameBoy.Debug.Emulator` | the managed emulator (vendored CoreBoy) and its debug session |
+| `Zafiro.GameBoy.Debug.Core` | debug session contracts and models |
+| `Zafiro.GameBoy.Debug.Symbols` | RGBDS symbol files |
+
+Because the emulator core is pure managed C#, every package is a single architecture-agnostic artifact that runs on every platform — no per-RID native builds.
 
 Publish locally (requires the `NUGET_API_KEY` environment variable):
 

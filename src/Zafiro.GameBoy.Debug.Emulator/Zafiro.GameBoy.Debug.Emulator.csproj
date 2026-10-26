@@ -5,11 +5,16 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <NoWarn>$(NoWarn);CS0169;CS0649;CS0618;CS8509;CS0414;CS0067;CS8632</NoWarn>
-    <IsPackable>false</IsPackable>
+    <IsPackable>true</IsPackable>
+    <Description>Managed Game Boy / Game Boy Color emulator (vendored CoreBoy core) with a debug session: stepping, breakpoints, memory and sound-register observers, savestates. No native dependencies.</Description>
+    <PackageTags>gameboy;gameboy-color;emulator;debugger</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Zafiro.GameBoy.Debug.Core\Zafiro.GameBoy.Debug.Core.csproj" />
     <ProjectReference Include="..\Zafiro.GameBoy.Debug.Symbols\Zafiro.GameBoy.Debug.Symbols.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>
 </Project>

@@ -4,7 +4,9 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <IsPackable>false</IsPackable>
+    <IsPackable>true</IsPackable>
+    <Description>Core types of Zafiro.GameBoy.Debug: debug session contracts, CPU state, memory and breakpoint models for Game Boy debugging.</Description>
+    <PackageTags>gameboy;gameboy-color;emulator;debugger</PackageTags>
   </PropertyGroup>
 
 </Project>

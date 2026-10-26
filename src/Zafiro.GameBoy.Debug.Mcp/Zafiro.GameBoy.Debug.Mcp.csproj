@@ -41,7 +41,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
     <None Include="..\Zafiro.GameBoy.Debug.Emulator\THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>
 
