@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-Zafiro.GameBoy.Debug.Mcp includes third-party software. The licenses and notices below are
+The Zafiro.GameBoy.Debug.Emulator and Zafiro.GameBoy.Debug.Mcp packages include third-party software. The licenses and notices below are
 reproduced in compliance with their terms. The authors and copyright holders of
 the third-party software are credited here; their ownership is fully retained.
 
@@ -12,7 +12,7 @@ The `CoreBoy/` subfolder of the `Zafiro.GameBoy.Debug.Emulator` project contains
 trimmed, vendored copy of the **CoreBoy** Game Boy emulator core by **David Whitney**
 (https://github.com/davidwhitney/CoreBoy), which is a C# port of **coffee-gb** by
 **Tomasz Rękawek** (https://github.com/trekawek/coffee-gb). This code is compiled
-into `Zafiro.GameBoy.Debug.Emulator.dll`, which ships inside the `Zafiro.GameBoy.Debug.Mcp` package.
+into `Zafiro.GameBoy.Debug.Emulator.dll`, which ships in the `Zafiro.GameBoy.Debug.Emulator` package and inside the `Zafiro.GameBoy.Debug.Mcp` tool.
 
 Both CoreBoy and coffee-gb are licensed under the MIT License. The upstream
 copyright notice is preserved verbatim at
